@@ -1,0 +1,25 @@
+Tasks
+
+[ ] Make an initial root reader and file tracker
+    [ ] Add date tracker for context and metadata
+    [ ] Design metadata schema
+    [ ] Normalize and convert files and create a structured local file manager
+        [ ] File type converter
+[ ] Create media indexer
+    [ ] Connect to Gemini
+    [ ] Design clear and specialized prompts for detailed indexing
+        [ ] Identify docs, screenshots, animated images, artwork, photos, etc
+        [ ] Ensure all relevant info is cleanly and effectively extracted
+        [ ] Rename and decide internal db path
+    [ ] Design response and metadata management schema
+    [ ] Connect to and store in Vector DB
+    [ ] Create Retrieval setup
+[ ] Create simple chat-based UI to find files
+
+Bugs
+
+[ ]
+
+Miscellaneous
+
+[ ] Create a random data downloader
