@@ -1,6 +1,11 @@
 import os
 import json
+from datetime import datetime
 
+from PIL import Image, ExifTags
+from PIL.TiffImagePlugin import IFDRational
+
+IFD_CODES = {i.value: i.name for i in ExifTags.IFD}
 IM_TYPES = ["jpg", "jpeg", "png", "webp", "heic", "heif", "avif"]
 VI_TYPES = ["mp4", "mpeg", "mov", "avi", "x-flv", "mpg", "webm", "wmv", "3gpp"]
 COMPAT_TYPES = [
@@ -24,25 +29,135 @@ COMPAT_TYPES = [
 ]
 
 
+def get_ext(path: str):
+    return os.path.splitext(path)[-1][1:].lower()
+
+
+def decode_bytes(data: bytes):
+    try:
+        if isinstance(data, bytes):
+            return data.decode()
+        elif isinstance(data, IFDRational):
+            return {"numerator": data.numerator, "denominator": data.denominator}
+        elif isinstance(data, tuple):
+            return tuple([decode_bytes(i) for i in data])
+    except:
+        return
+    return data
+
+
+def get_embedded_metadata(image_path: str):
+    # Extract:
+    # - DateTime orig, OffsetTime/TimeOrig, SubsecTimeOrig
+    # - GPSInfo, GPSDestBearing, AmbientTemp, Humidity
+    # - LensModel/Software, HostComputer
+    # - ImageDescription
+    jpgs, pngs, heifs = ["jpg", "jpeg"], ["png"], ["heif", "heic"]
+
+    extracted_meta = {}
+    file_ext = get_ext(image_path)
+
+    if file_ext in jpgs:
+        img = Image.open(image_path)
+        img_exif = img.getexif()
+        for ifd_key, ifd_value in img_exif.items():
+            if ifd_key in IFD_CODES:
+                ifd_name = IFD_CODES[ifd_key]
+                ifd_subdata = img_exif.get_ifd(ifd_key).items()
+                ifd_data = {}
+                for ifd_subkey, ifd_subvalue in ifd_subdata:
+                    ifd_subname = (
+                        ExifTags.GPSTAGS.get(ifd_subkey, None)
+                        or ExifTags.TAGS.get(ifd_subkey, None)
+                        or ifd_subkey
+                    )
+                    ifd_data[ifd_subname] = decode_bytes(ifd_subvalue)
+            else:
+                ifd_name = ExifTags.TAGS.get(ifd_key, ifd_key)
+                ifd_data = decode_bytes(img_exif.get(ifd_key))
+            extracted_meta[ifd_name] = ifd_data
+    elif file_ext in pngs:
+        print("PNG Not supported")
+    elif file_ext in heifs:
+        print("HEIF/HEIC Not supported")
+
+    # print("=" * 20)
+    # print(json.dumps(extracted_meta, indent=2))
+    return extracted_meta
+
+
+def format_datetime(timestamp: float | tuple | list):
+    input_type = type(timestamp)
+    if input_type == float:
+        formatted_timestamp = str(datetime.fromtimestamp(timestamp))
+    elif input_type == list or input_type == tuple:
+        formatted_timestamp = []
+        for timestamp_i in timestamp:
+            formatted_timestamp.append(format_datetime(timestamp_i))
+        formatted_timestamp = input_type(formatted_timestamp)
+    else:
+        formatted_timestamp = datetime.now()
+    return formatted_timestamp
+
+
+def get_windows_times(file_path: str):
+    ctime, mtime = os.path.getctime(file_path), os.path.getmtime(file_path)
+    return ctime, mtime, datetime.now().timestamp()
+
+
+def get_unix_times(file_path: str):
+    stat = os.stat(file_path)
+    try:
+        ctime = stat.st_birthtime
+    except AttributeError:
+        ctime = stat.st_ctime
+    mtime = os.path.getmtime(file_path)
+    return ctime, mtime, datetime.now().timestamp()
+
+
+def get_time_function():
+    import platform
+
+    support_dict = {
+        "Windows": get_windows_times,
+        "Linux": get_unix_times,
+        "Darwin": get_unix_times,
+    }
+    curr_os = platform.system()
+    if curr_os in support_dict.keys():
+        return support_dict[curr_os]
+    return None
+
+
 def get_dates(file_path: str):
-    return ""
+    creation_date, modification_date, index_date = format_datetime(
+        get_time_function()(file_path)
+    )
+    return {
+        "creation_date": creation_date,
+        "modification_date": modification_date,
+        "index_date": index_date,
+    }
 
 
-def check_file_types(file_root: str):
-    files_found = {}
+def index_folder(file_root: str, verbose: bool = False):
+    files_index = {}
     dummy_meta = {
+        # Essentials
         "filename": "",  # Name shall be normalized later
         "media_type": "",  # Media type is "image" or "video"
         "ext": "",  # Media type extension
         "is_compat": False,
         # Dates
-        "creation_date": "",  # Find out from metadata
-        "mod_date": "",  # Find out from metadata
-        "index_date": "",  # Get system date
+        "creation_date": "",
+        "modification_date": "",
+        "index_date": "",
+        # Detailed metadata
+        "extracted_metadata": {},
     }
     for path, dirs, files in os.walk(file_root):
         for file in files:
-            file_ext = os.path.splitext(file)[-1][1:]
+            file_ext = os.path.splitext(file)[-1][1:].lower()
             media_type = ""
             is_compat = False
             if file_ext in IM_TYPES:
@@ -53,14 +168,20 @@ def check_file_types(file_root: str):
                 is_compat = True
 
             file_path = os.path.abspath(os.path.normpath(os.path.join(path, file)))
-            files_found[file_path] = dummy_meta.copy()
-            files_found[file_path]["filename"] = file
-            files_found[file_path]["media_type"] = media_type
-            files_found[file_path]["ext"] = file_ext
-            files_found[file_path]["is_compat"] = is_compat
+            files_index[file_path] = dummy_meta.copy()
+            files_index[file_path]["filename"] = file
+            files_index[file_path]["media_type"] = media_type
+            files_index[file_path]["ext"] = file_ext
+            files_index[file_path]["is_compat"] = is_compat
+            files_index[file_path]["extracted_metadata"] = get_embedded_metadata(
+                file_path
+            )
+            files_index[file_path].update(get_dates(file_path))
 
-    print(json.dumps(files_found, indent=2))
+    if verbose:
+        print(json.dumps(files_index, indent=2))
+    return files_index
 
 
 if __name__ == "__main__":
-    check_file_types("images_root")
+    index_folder("images_root", verbose=True)

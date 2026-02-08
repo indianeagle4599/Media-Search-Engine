@@ -1,24 +1,35 @@
 Tasks
 
 [ ] Make an initial root reader and file tracker
-    [ ] Add date tracker for context and metadata
+    [X] Add date tracker for context and metadata
     [ ] Design metadata schema
     [ ] Normalize and convert files and create a structured local file manager
         [ ] File type converter
+        [ ] File renaming as necessary
+    [ ] Effectively extract metadata
+        [ ] Support JPEG metadata extrcation using exif
+        [ ] Support PNG and HEIF metadata extraction
 [ ] Create media indexer
-    [ ] Connect to Gemini
+    [X] Connect to Gemini
     [ ] Design clear and specialized prompts for detailed indexing
-        [ ] Identify docs, screenshots, animated images, artwork, photos, etc
-        [ ] Ensure all relevant info is cleanly and effectively extracted
+        [X] Identify docs, screenshots, animated images, artwork, photos, etc
+        [X] Ensure all relevant info is cleanly and effectively extracted
         [ ] Rename and decide internal db path
     [ ] Design response and metadata management schema
-    [ ] Connect to and store in Vector DB
+        [ ] Check pydantic for maintaining standard schema
+    [ ] Connect to and store in DB
+        [ ] Create a JSON DB (like MongoDB) to store content
+        [ ] Create a Vector DB setup to populate in a more abstract way
     [ ] Create Retrieval setup
+        [ ] Allow simple retrieval options like dates, standard text matching, etc.
+        [ ] Create context-based retrieval options to leverage extracted JSON objects and more specialised searching.
 [ ] Create simple chat-based UI to find files
 
 Bugs
 
-[ ]
+[ ] Allow analysis support for avif and other similar image file types.
+[ ] Improve client API connection setup for cleaner and more predictable connection.
+[ ] 
 
 Miscellaneous
 

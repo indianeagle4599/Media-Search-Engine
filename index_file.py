@@ -1,26 +1,101 @@
-import os
+import os, warnings, json
+from typing import Literal
 from dotenv import load_dotenv
 
 load_dotenv()
-api_key = os.getenv("GEM_API_KEY")
+REPO_ROOT = os.getenv("REPO_ROOT")
+GEM_API_KEY = os.getenv("GEM_API_KEY")
 
 from google import genai
 from google.genai import types
 
+client = genai.Client(api_key=GEM_API_KEY)
 
-with open("images_root/60e7ae50-03dc-11f0-a387-437e2fb661fc.jpg", "rb") as f:
-    image_bytes = f.read()
 
-client = genai.Client(api_key=api_key)
-response = client.models.generate_content(
-    model="gemini-3-flash-preview",
-    contents=[
-        types.Part.from_bytes(
-            data=image_bytes,
-            mime_type="image/jpeg",
-        ),
-        "Caption this image.",
-    ],
-)
+def parse_prompt(prompt_type: Literal["describe_image",]):
+    path_dict, parsed_prompts = {}, {}
+    if prompt_type == "describe_image":
+        prompt_root = os.path.join(REPO_ROOT, "prompts", prompt_type)
+        section_files = os.listdir(prompt_root)
+        for section_file in section_files:
+            section = os.path.splitext(section_file)[0]
+            section_path = os.path.join(prompt_root, section_file)
+            path_dict[section] = section_path
 
-print(response.text)
+    if len(path_dict):
+        # path_dict = {"admin": "path/to/admin.md", "prompt": "path/to/prompt.md"}
+        for section, section_path in path_dict.items():
+            section_prompt = ""
+            try:
+                with open(section_path, "r") as f:
+                    section_prompt = "".join(f.readlines())
+            except FileNotFoundError:
+                print(
+                    f'Found nothing at "{section_path}" for prompt section named: {section}.'
+                )
+            parsed_prompts[section] = section_prompt
+    return parsed_prompts
+
+
+def assemble_prompt(prompt_type: Literal["describe_image",], attachments_dict: dict):
+    parsed_prompts = parse_prompt("describe_image")
+    assembled_prompts = {}
+    for section, section_prompt in parsed_prompts.items():
+        # Add attachments
+        for attachments in attachments_dict:
+            find_attachements = f"__{attachments}__"
+            if find_attachements in section_prompt:
+                section_prompt = section_prompt.replace(
+                    find_attachements, attachments_dict[attachments]
+                )
+        assembled_prompts[section] = section_prompt
+    return assembled_prompts
+
+
+def describe_image(file_path: str, metadata: dict):
+    is_compat = metadata.get("is_compat", False)
+    filename = metadata.get("filename", "")
+    media_type = metadata.get("media_type")
+    ext = metadata.get("ext")
+
+    if is_compat:
+        if media_type == "image":
+            prompt_type = "describe_image"
+            attachments = {"metadata_dict": json.dumps(metadata, indent=2)}
+            prompt_sections = assemble_prompt(prompt_type, attachments)
+
+            with open(file_path, "rb") as f:
+                image_bytes = f.read()
+
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=[
+                    prompt_sections["prompt"],
+                    types.Part.from_bytes(
+                        data=image_bytes,
+                        mime_type=f"{media_type}/{ext}",
+                    ),
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=prompt_sections["admin"],
+                    response_mime_type="application/json",
+                ),
+            )
+            print(response.text)
+        else:
+            print("Not image")
+    else:
+        warnings.warn(
+            f"Skipping [{filename}] as '{media_type}/{ext}' is not supported."
+        )
+
+
+if __name__ == "__main__":
+    from normalize_media import index_folder
+
+    images_root = "images_root"
+    folder_dict = index_folder(images_root)
+    for file in folder_dict:
+        metadata = folder_dict[file]
+        describe_image(file, metadata)
+        # break
