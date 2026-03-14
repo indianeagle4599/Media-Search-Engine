@@ -1,3 +1,9 @@
+"""
+prompting_utils.py
+
+Contains utilities to create modular and versatile prompts and perform the necessary API calls to get relevant outputs as text or embeddings as relevant.
+"""
+
 import os, warnings, json
 from typing import Literal
 from dotenv import load_dotenv
@@ -91,7 +97,7 @@ def describe_image(file_path: str, metadata: dict):
 
 
 if __name__ == "__main__":
-    from normalize_media import index_folder
+    from indexing_utils import index_folder
 
     images_root = "images_root"
     folder_dict = index_folder(images_root)

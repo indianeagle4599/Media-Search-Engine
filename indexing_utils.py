@@ -1,3 +1,9 @@
+"""
+indexing_utils.py
+
+Contains utilities to understand folder structure, read media and read associated metadata for clearer context and better standardization.
+"""
+
 import os
 import json
 from datetime import datetime
@@ -6,7 +12,19 @@ from PIL import Image, ExifTags
 from PIL.TiffImagePlugin import IFDRational
 
 IFD_CODES = {i.value: i.name for i in ExifTags.IFD}
-IM_TYPES = ["jpg", "jpeg", "png", "webp", "heic", "heif", "avif"]
+IM_TYPES = [
+    "jpg",
+    "jpeg",
+    "png",
+    "webp",
+    "heic",
+    "heif",
+    "avif",
+    "tif",
+    "tiff",
+    "bmp",
+    "svg",
+]
 VI_TYPES = ["mp4", "mpeg", "mov", "avi", "x-flv", "mpg", "webm", "wmv", "3gpp"]
 COMPAT_TYPES = [
     # Images
@@ -36,14 +54,86 @@ def get_ext(path: str):
 def decode_bytes(data: bytes):
     try:
         if isinstance(data, bytes):
-            return data.decode()
+            return data.decode().strip("\x00").strip()
         elif isinstance(data, IFDRational):
-            return {"numerator": data.numerator, "denominator": data.denominator}
+            return float(data.numerator) / float(data.denominator)
         elif isinstance(data, tuple):
             return tuple([decode_bytes(i) for i in data])
     except:
         return
     return data
+
+
+def clean_exif_tags(extracted_meta: dict):
+    whitelist = {
+        # File
+        "Filename",
+        "Ext",
+        "MimeType",
+        # Time
+        "DateTime",
+        "DateTimeOriginal",
+        "DateTimeDigitized",
+        "OffsetTime",
+        "OffsetTimeOriginal",
+        "OffsetTimeDigitized",
+        "SubsecTime",
+        "SubsecTimeOriginal",
+        "SubsecTimeDigitized",
+        "GPSDateStamp",
+        "GPSTimeStamp",
+        # Place
+        "GPSLatitude",
+        "GPSLongitude",
+        "GPSAltitude",
+        "GPSImgDirection",
+        "GPSDestBearing",
+        "GPSAreaInformation",
+        # About image
+        "DigitalZoomRatio",
+        "XResolution",
+        "YResolution",
+        "ExifImageWidth",
+        "ExifImageHeight",
+        "SceneCaptureType",
+        # About device
+        "Make",
+        "Model",
+        "LensMake",
+        "LensModel",
+        "Orientation",
+        "FNumber",
+        "FocalLength",
+        "ApertureValue",
+        "Flash",
+        "ExposureTime",
+        "ShutterSpeedValue",
+        "Software",
+        # Misc
+        "ImageDescription",
+        "UserComment",
+        "SceneType",
+        "SubjectArea",
+        "SubjectLocation",
+        "AmbientTemperature",
+        "Humidity",
+        "Pressure",
+        "SubjectDistance",
+        "Artist",
+        "Copyright",
+        "Rating",
+        "ISO",
+        "ISOSpeedRatings",
+    }
+    clean_meta = {}
+    for key, value in extracted_meta.items():
+        if type(value) == dict:
+            clean_subdict = clean_exif_tags(value)
+            if clean_subdict:
+                clean_meta[key] = clean_subdict
+        elif key in whitelist:
+            clean_meta[key] = value
+    return clean_meta
 
 
 def get_embedded_metadata(image_path: str):
@@ -76,6 +166,7 @@ def get_embedded_metadata(image_path: str):
                 ifd_name = ExifTags.TAGS.get(ifd_key, ifd_key)
                 ifd_data = decode_bytes(img_exif.get(ifd_key))
             extracted_meta[ifd_name] = ifd_data
+        extracted_meta = clean_exif_tags(extracted_meta=extracted_meta)
     elif file_ext in pngs:
         print("PNG Not supported")
     elif file_ext in heifs:
