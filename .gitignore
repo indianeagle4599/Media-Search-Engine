@@ -1,3 +1,5 @@
 *.env
 images_root/*
 *.pyc
+.chromadb*
+json_outs/*

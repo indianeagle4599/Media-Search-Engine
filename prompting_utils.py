@@ -87,7 +87,8 @@ def describe_image(file_path: str, metadata: dict):
                     response_mime_type="application/json",
                 ),
             )
-            print(response.text)
+            output = json.loads(response.text)
+            return output
         else:
             print("Not image")
     else:
@@ -99,9 +100,26 @@ def describe_image(file_path: str, metadata: dict):
 if __name__ == "__main__":
     from indexing_utils import index_folder
 
+    MODE = "read"  # allowed modes are "read", "prompt"
+
     images_root = "images_root"
+    output_file = "json_outs\\test_outs.json"
+
     folder_dict = index_folder(images_root)
-    for file in folder_dict:
-        metadata = folder_dict[file]
-        describe_image(file, metadata)
-        # break
+    outputs = {}
+    if MODE == "read":
+        with open(output_file, "r") as f:
+            outputs = json.load(f)
+    elif MODE == "prompt":
+        for file in folder_dict:
+            metadata = folder_dict[file]
+            try:
+                output = describe_image(file, metadata)
+                if output:
+                    outputs[file] = output
+            except Exception as e:
+                print(e)
+            # break
+        with open(output_file, "w") as f:
+            f.writelines(json.dumps(outputs, indent=2))
+    print(json.dumps(outputs, indent=2))

@@ -1,3 +1,8 @@
+Next Up
+
+[ ] Fix "prompting_utils" json file populator to populate image only once per model.
+[ ] Check effective ways of using ChromaDB for semantic and standard searches.
+
 Tasks
 
 [ ] Make an initial root reader and file tracker
@@ -26,8 +31,10 @@ Tasks
         [ ] Create a JSON DB (like MongoDB) to store content
         [ ] Create a Vector DB setup to populate in a more abstract way
     [ ] Create Retrieval setup
+        [X] Create an initial ChromaDB setup with simple visual evaluation.
         [ ] Allow simple retrieval options like dates, standard text matching, etc.
         [ ] Create context-based retrieval options to leverage extracted JSON objects and more specialised searching.
+            [ ] Explore more effective embedding creation methods from structured JSONs to improve retrieval quality.
 [ ] Create simple chat-based UI to find files
 
 Bugs
