@@ -4,8 +4,7 @@ indexing_utils.py
 Contains utilities to understand folder structure, read media and read associated metadata for clearer context and better standardization.
 """
 
-import os
-import json
+import os, json, hashlib
 from datetime import datetime
 
 from PIL import Image, ExifTags
@@ -62,6 +61,18 @@ def decode_bytes(data: bytes):
     except:
         return
     return data
+
+
+def get_hash(file_path: str):
+    try:
+        image_hash = ""
+        with open(file_path, "rb") as f:
+            image_hash = hashlib.sha256(f.read()).hexdigest()
+        if image_hash:
+            return image_hash
+    except Exception as e:
+        print(e)
+    raise f"Unable to get file hash for: '{file_path}'"
 
 
 def clean_exif_tags(extracted_meta: dict):
@@ -234,8 +245,9 @@ def get_dates(file_path: str):
 def index_folder(file_root: str, verbose: bool = False):
     files_index = {}
     dummy_meta = {
+        "file_hash": "",
         # Essentials
-        "filename": "",  # Name shall be normalized later
+        "file_name": "",  # Name shall be normalized later
         "media_type": "",  # Media type is "image" or "video"
         "ext": "",  # Media type extension
         "is_compat": False,
@@ -259,15 +271,20 @@ def index_folder(file_root: str, verbose: bool = False):
                 is_compat = True
 
             file_path = os.path.abspath(os.path.normpath(os.path.join(path, file)))
-            files_index[file_path] = dummy_meta.copy()
-            files_index[file_path]["filename"] = file
-            files_index[file_path]["media_type"] = media_type
-            files_index[file_path]["ext"] = file_ext
-            files_index[file_path]["is_compat"] = is_compat
-            files_index[file_path]["extracted_metadata"] = get_embedded_metadata(
-                file_path
+            file_hash = get_hash(file_path)
+            files_index[file_hash] = dummy_meta.copy()
+
+            files_index[file_hash].update(
+                {
+                    "file_path": file_path,
+                    "file_name": file,
+                    "media_type": media_type,
+                    "ext": file_ext,
+                    "is_compat": is_compat,
+                    "extracted_metadata": get_embedded_metadata(file_path),
+                }
             )
-            files_index[file_path].update(get_dates(file_path))
+            files_index[file_hash].update(get_dates(file_path))
 
     if verbose:
         print(json.dumps(files_index, indent=2))
