@@ -2,6 +2,8 @@ Next Up
 
 [ ] Design simpler schema to store embeddings and relevant fields in Chroma metadata
 [ ] Check effective ways of using ChromaDB for semantic and standard searches.
+[ ] Create a simple ranking evaluation to evaluate embedding effectiveness and retrieval quality.
+[ ] Design test cases for verious functions using PyTest.
 
 Tasks
 

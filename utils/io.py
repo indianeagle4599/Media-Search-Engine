@@ -1,5 +1,5 @@
 """
-indexing_utils.py
+io.py
 
 Contains utilities to understand folder structure, read media and read associated metadata for clearer context and better standardization.
 """

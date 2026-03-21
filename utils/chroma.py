@@ -1,13 +1,20 @@
 """
-chroma_utils.py
+chroma.py
 
 Contains utilities to create, update and use a chromadb for storing and querying from the descriptions of all images.
 """
 
 import chromadb
+from chromadb.utils.embedding_functions.ollama_embedding_function import (
+    OllamaEmbeddingFunction,
+)
 from collections.abc import MutableMapping
 
 chroma_client = chromadb.PersistentClient(path="./.chromadb")
+ollama_ef = OllamaEmbeddingFunction(
+    url="http://localhost:11434",
+    model_name="mxbai-embed-large",
+)
 
 
 def flatten(dictionary, parent_key="", separator="."):
@@ -25,7 +32,7 @@ def prep_dict_for_upsert(db_dict: dict):
     ids, documents, metadatas = [], [], []
     for key, val in db_dict.items():
         if val:
-            description = val["content"]["detailed_description"]
+            description = val["content"]["summary"]
             ids.append(str(key))
             documents.append(str(description))
             metadatas.append(flatten(val))
@@ -40,6 +47,7 @@ def add_to_db(
     collection = chroma_client.create_collection(
         name=collection_name,
         configuration={"hnsw": {"space": "cosine"}},
+        embedding_function=ollama_ef,
         get_or_create=True,
     )
     if db_dict:
@@ -54,20 +62,14 @@ if __name__ == "__main__":
     import json
 
     descriptions: dict = {}
-    with open("assets\\test_outs.json", "r") as f:
+    with open("json_outs\\test_outs.json", "r") as f:
         descriptions = json.load(f)
 
     my_collection = add_to_db(descriptions, collection_name="image_descriptions")
-    test_queries = [
-        "Images containing people.",
-        "Images containing documents.",
-        "Images containing wallpaper-like images.",
-    ]
+    test_queries = ["people", "documents", "wallpapers", "party", "nature"]
     results = {}
     for test_query in test_queries:
         result = my_collection.query(query_texts=[test_query], n_results=5)
         # results[test_query] = result
-        results[test_query] = {
-            key: result[key] for key in ["ids", "documents", "distances"]
-        }
+        results[test_query] = {key: result[key] for key in ["documents", "distances"]}
     print(json.dumps(results, indent=2))
