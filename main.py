@@ -5,15 +5,17 @@ The main orchestrator. Which:
 1. Finds and extracts metadata from all images in given folder.
 2. Fetches existing descriptions from the local DB.
 3. Tries to populate the db with descriptions of images not yet described.
-(Next) 4. Populate new entries in ChromaDB
+4. Populate new entries in ChromaDB
 """
 
-import os, json, warnings, hashlib, pymongo
+import os, json, warnings, hashlib
+import pymongo, chromadb
 from dotenv import load_dotenv
 
 from utils.io import index_folder
 from utils.mongo import check_if_exists, upsert_dict_objects
 from utils.prompt import describe_image
+from utils.chroma import populate_db
 
 from google import genai
 
@@ -22,6 +24,7 @@ GEM_API_KEY = os.getenv("GEM_API_KEY")
 MONGO_URL = os.getenv("MONGO_URL")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME")
 MONGO_COLLECTION_NAME = os.getenv("MONGO_COLLECTION_NAME")
+CHROMA_URL = os.getenv("CHROMA_URL")
 
 API_NAME = "gemini"
 MODEL_NAME = "gemini-2.5-flash-lite"
@@ -100,6 +103,8 @@ def main():
     client = genai.Client(api_key=GEM_API_KEY)
     # Connect to MongoDB
     collection = pymongo.MongoClient(MONGO_URL)[MONGO_DB_NAME][MONGO_COLLECTION_NAME]
+    # Connect to ChromaDB
+    chroma_client = chromadb.PersistentClient(path=CHROMA_URL)
 
     verbose = True
     images_root = "images_root"
@@ -113,8 +118,9 @@ def main():
         missing_keys=missing_keys,
         collection=collection,
         client=client,
-        verbose=True,
     )
+
+    populate_db(entries=descriptions, chroma_client=chroma_client)
 
 
 if __name__ == "__main__":

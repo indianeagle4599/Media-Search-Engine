@@ -3,12 +3,13 @@ Next Up
 [ ] Design simpler schema to store embeddings and relevant fields in Chroma metadata
 [ ] Check effective ways of using ChromaDB for semantic and standard searches.
 [ ] Create a simple ranking evaluation to evaluate embedding effectiveness and retrieval quality.
-[ ] Design test cases for verious functions using PyTest.
+[ ] Design test cases for various functions using PyTest.
 
 Tasks
 
 [ ] Make an initial root reader and file tracker
-    [X] Add date tracker for context and metadata
+    [ ] Add date tracker for context and metadata
+        [ ] Create a canonical date manager
     [ ] Design metadata schema
     [ ] Normalize and convert files and create a structured local file manager
         [ ] Create a simple, temp-file type converter (a volatile proxy), to pass directly unsupported images to the LLM.
@@ -35,8 +36,8 @@ Tasks
         [ ] Add simple search options
     [ ] ChromaDB
         [X] Create a Vector DB setup to populate in a more abstract way
-        [ ] Design simpler schema to store embeddings and relevant fields in Chroma metadata
-        [ ] Design adapters and create syncing code to quickly sync chromaDB with mongoDB
+        [X] Design simpler schema to store embeddings and relevant fields in Chroma metadata
+        [X] Design adapters and create syncing code to quickly sync chromaDB with mongoDB
         [ ] Design and test different embedding models for improved and effective semantic searching
         [ ] Design dense, multi-field semantic search
     [ ] Create Retrieval setup
