@@ -8,3 +8,4 @@ defusedxml
 chromadb
 pymongo
 ollama
+pandas

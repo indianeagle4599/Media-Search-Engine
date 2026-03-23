@@ -1,8 +1,11 @@
 Next Up
 
-[ ] Design simpler schema to store embeddings and relevant fields in Chroma metadata
-[ ] Check effective ways of using ChromaDB for semantic and standard searches.
-[ ] Create a simple ranking evaluation to evaluate embedding effectiveness and retrieval quality.
+[ ] Canonicalise date fields and create time-based retrieval options using Chroma
+[ ] Design a simple schema to store image metadata for standard search
+
+[ ] Add relevant specialisations and weighting method to improve mult-collection retrieval
+
+[ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
 
 Tasks
@@ -44,11 +47,9 @@ Tasks
         [X] Create an initial ChromaDB setup with simple visual evaluation.
         [ ] Allow simple retrieval options like dates, standard text matching, etc.
         [ ] Create context-based retrieval options to leverage extracted JSON objects and more specialised searching.
+            [X] Create a naive all-collection retrieval and combination function
+            [ ] Add relevant specialisations and weighting method to improve mult-collection retrieval
             [ ] Explore more effective embedding creation methods from structured JSONs to improve retrieval quality.
 [ ] Create simple chat-based UI to find files
-
-
-Miscellaneous
-
 [ ] Allow analysis support for avif and other image file types.
 [ ] Create a random data downloader

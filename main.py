@@ -5,7 +5,7 @@ The main orchestrator. Which:
 1. Finds and extracts metadata from all images in given folder.
 2. Fetches existing descriptions from the local DB.
 3. Tries to populate the db with descriptions of images not yet described.
-4. Populate new entries in ChromaDB
+4. Populate new entries in ChromaDB and test retrieval using queries.
 """
 
 import os, json, warnings, hashlib
@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from utils.io import index_folder
 from utils.mongo import check_if_exists, upsert_dict_objects
 from utils.prompt import describe_image
-from utils.chroma import populate_db
+from utils.chroma import populate_db, query_all_collections
 
 from google import genai
 
@@ -108,8 +108,11 @@ def main():
 
     verbose = True
     images_root = "images_root"
+
+    # Read root folder to find all images and their metadata
     folder_dict = index_folder(images_root)
 
+    # Read existing DB to find image descriptions
     descriptions, missing_keys = fetch_existing(folder_dict, collection)
 
     # Try to populate missing descriptions
@@ -120,7 +123,32 @@ def main():
         client=client,
     )
 
+    # Populate DB results and new descriptions in ChromaDB
     populate_db(entries=descriptions, chroma_client=chroma_client)
+
+    query_texts = [
+        "nature",
+        "people",
+        "party",
+        "daytime",
+        "day time",
+        "night time",
+        ["boy", "girl", "camera"],
+    ]
+    # Retrieve from ChromaDB
+    ranked_queries = query_all_collections(
+        chroma_client=chroma_client,
+        query_texts=query_texts,
+    )
+
+    k = 5
+    for query_text, result in ranked_queries.items():
+        top_k_image_ids = result["ids"][:k]
+        top_k_data = [
+            descriptions[i]["description"]["content"]["summary"]
+            for i in top_k_image_ids
+        ]
+        print(f"{query_text}:", json.dumps(top_k_data, indent=2))
 
 
 if __name__ == "__main__":

@@ -9,33 +9,68 @@ from chromadb.utils.batch_utils import create_batches
 from chromadb.utils.embedding_functions.ollama_embedding_function import (
     OllamaEmbeddingFunction,
 )
+from chromadb.utils.embedding_functions import (
+    DefaultEmbeddingFunction,
+)
 
+import pandas as pd
+
+collection_type_map = {
+    ## Sentence-like
+    "sentence": [
+        "summary",
+        "detailed_description",
+        "ocr_text",
+        "miscellaneous",
+        "event",
+        "analysis",
+        "metadata_relevance",
+        "other_details",
+    ],
+    # List-like
+    "list": ["objects", "vibe"],
+    # Word-like
+    "word": ["background", "primary_category", "intent", "composition"],
+    # Absolute (non-semantic)
+    "absolute": ["estimated_date"],
+}
+collection_type_rev_map = {v_i: k for k, v in collection_type_map.items() for v_i in v}
+
+minilm_ef = DefaultEmbeddingFunction()  # Currently "ONNXMiniLM_L6_V2" as of 23/03/2026
 ollama_ef = OllamaEmbeddingFunction(
     url="http://localhost:11434",
     model_name="mxbai-embed-large",
 )
 
-collection_ef_map = {"sentence": ollama_ef}
+collection_ef_map = {
+    "sentence": ollama_ef,
+    "list": minilm_ef,
+    "word": minilm_ef,
+}
 
 
-def prep_sentence_dict_for_upsert(field_dict: dict):
+def prep_dict_for_upsert(field_dict: dict):
     ids = []
     documents = []
     for key, val in field_dict.items():
-        if val:
+        if not val:
+            continue
+
+        if isinstance(val, list):
+            for i, v in enumerate(val):
+                if v:
+                    ids.append(f"{key}_item_{i+1}")
+                    documents.append(str(v))
+
+        elif isinstance(val, dict):
+            for k, v in val.items():
+                if v:
+                    ids.append(f"{key}_{k}")
+                    documents.append(str(v))
+
+        else:
             ids.append(str(key))
             documents.append(str(val))
-    return ids, documents
-
-
-def prep_list_dict_for_upsert(field_dict: dict):
-    ids, documents = [], []
-    for key, val_list in field_dict.items():
-        if len(val_list):
-            for i, val in enumerate(val_list):
-                if val:
-                    ids.append(str(key) + f"_object_{i+1}")
-                    documents.append(str(val))
     return ids, documents
 
 
@@ -153,26 +188,120 @@ def populate_db(
 
     for field_type, field_object in class_wise_db_dict.items():
         for field_name, field_dict in field_object.items():
-            collection_kwargs = {
-                "name": field_name,
-                "configuration": {"hnsw": {"space": "cosine"}},
-                "get_or_create": True,
-            }
-            if field_name in collection_ef_map:
-                collection_kwargs["embedding_function"] = collection_ef_map[field_name]
+            if field_type in ["sentence", "list", "word"]:
+                collection_kwargs = {
+                    "name": field_name,
+                    "configuration": {"hnsw": {"space": "cosine"}},
+                    "get_or_create": True,
+                    "embedding_function": collection_ef_map.get(field_type),
+                }
+                collection = chroma_client.create_collection(**collection_kwargs)
+                ids, documents = prep_dict_for_upsert(field_dict)
 
-            if field_type == "sentence" or field_type == "word":
-                ids, documents = prep_sentence_dict_for_upsert(field_dict)
-            elif field_type == "list":
-                ids, documents = prep_list_dict_for_upsert(field_dict)
+                if not ids or not documents:
+                    continue
+
+                batches = create_batches(chroma_client, ids=ids, documents=documents)
+                for batch_ids, _, _, batch_documents in batches:
+                    collection.upsert(ids=batch_ids, documents=batch_documents)
+
             elif field_type == "absolute":
-                # NO EMBEDDINGS, check simplest way to use DB
+                # NO EMBEDDINGS, create a collection with all flat, non-semantic fields
                 pass
 
-            if not ids or not documents or len(ids) != len(documents):
-                continue
 
-            collection = chroma_client.create_collection(**collection_kwargs)
-            batches = create_batches(chroma_client, ids=ids, documents=documents)
-            for batch_ids, _, batch_metadatas, batch_documents in batches:
-                collection.upsert(ids=batch_ids, documents=batch_documents)
+def semantic_search_collection(
+    collection: chromadb.Collection, query_texts: list[str], n_results: int = 5
+):
+    final_query_texts = set()
+    if len(query_texts):
+        for query_i in query_texts:
+            if isinstance(query_i, list):
+                [final_query_texts.add(query_i_j) for query_i_j in query_i]
+            elif isinstance(query_i, str):
+                final_query_texts.add(query_i)
+
+    final_query_texts = list(final_query_texts)
+    if not len(final_query_texts):
+        return pd.DataFrame()
+
+    query_results = collection.query(
+        query_texts=final_query_texts,
+        n_results=n_results,
+        include=["documents", "distances"],
+    )
+
+    query_results_df = []
+    for i, query_text in enumerate(final_query_texts):
+        query_result = pd.DataFrame(
+            {
+                q: v[i]
+                for q, v in query_results.items()
+                if v is not None and q in ["ids", "documents", "distances"]
+            }
+        )
+        query_result["rank"] = list(range(1, 1 + len(query_result.iloc[:, 0])))
+        query_result["query_text"] = query_text
+        query_result["collection"] = collection.name
+        query_results_df.append(query_result)
+
+    query_results_df = pd.concat(query_results_df).reset_index(drop=True)
+    return query_results_df
+
+
+def get_final_results(
+    query_text: str, query_results_df: pd.DataFrame, rrf_smoothing: int = 60
+):
+    if isinstance(query_text, str):
+        relevant_df = query_results_df[
+            query_results_df["query_text"] == query_text
+        ].copy()
+    elif isinstance(query_text, list):
+        relevant_df = query_results_df[
+            query_results_df["query_text"].isin(query_text)
+        ].copy()
+
+    def clean_doc_id(doc_id):
+        # sha256 (64 chars) + "_" + sha1 (40 chars) (64+1+40 = 105)
+        return doc_id[:105]
+
+    relevant_df["ids"] = relevant_df["ids"].apply(lambda x: clean_doc_id(x))
+    relevant_df["rrf_score"] = 1 / (relevant_df["rank"] + rrf_smoothing)
+
+    rrf_vals = (
+        relevant_df.groupby("ids")["rrf_score"].sum().sort_values(ascending=False)
+    )
+    ranks = pd.DataFrame(
+        {
+            "ids": rrf_vals.index,
+            "score": rrf_vals.values,
+            "rank": list(range(len(rrf_vals))),
+        }
+    )
+    return ranks
+
+
+def query_all_collections(
+    chroma_client: chromadb.PersistentClient, query_texts: list, n_results: int = 5
+):
+    combined_query_results = []
+    collections = chroma_client.list_collections()
+    for col in collections:
+        col_name = col.name if hasattr(col, "name") else col
+        col_type = collection_type_rev_map.get(col_name) or "sentence"
+
+        collection = chroma_client.get_collection(
+            col_name, embedding_function=collection_ef_map.get(col_type)
+        )
+        query_results = semantic_search_collection(
+            collection=collection, query_texts=query_texts, n_results=n_results
+        )
+        combined_query_results.append(query_results)
+    combined_query_results = pd.concat(combined_query_results).reset_index(drop=True)
+
+    final_results = {}
+    for query_text in query_texts:
+        result = get_final_results(query_text, combined_query_results)
+        final_results[str(query_text)] = {k: list(result[k]) for k in result}
+
+    return final_results
