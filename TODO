@@ -1,7 +1,7 @@
 Next Up
 
 [ ] Canonicalise date fields and create time-based retrieval options using Chroma
-[ ] Design a simple schema to store image metadata for standard search
+[ ] Simplify schema to leverage metadata search and combine collections to improve retrieval speed, scalibility and reliability
 
 [ ] Add relevant specialisations and weighting method to improve mult-collection retrieval
 
