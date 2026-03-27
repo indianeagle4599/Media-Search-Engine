@@ -99,6 +99,8 @@ def populate_missing(
 
 
 def main():
+    import time
+
     # Connect to Gemini
     client = genai.Client(api_key=GEM_API_KEY)
     # Connect to MongoDB
@@ -110,22 +112,40 @@ def main():
     images_root = "images_root"
 
     # Read root folder to find all images and their metadata
+    start = time.time()
     folder_dict = index_folder(images_root)
+    stop = time.time()
+    print(f"Time taken to index folder: {stop - start:.2f} seconds")
 
     # Read existing DB to find image descriptions
+    start = time.time()
     descriptions, missing_keys = fetch_existing(folder_dict, collection)
+    stop = time.time()
+    print(
+        f"Time taken to fetch existing entries from MongoDB: {stop - start:.2f} seconds"
+    )
 
-    # Try to populate missing descriptions
+    # # Try to populate missing descriptions
+    start = time.time()
     descriptions = populate_missing(
         descriptions=descriptions,
         missing_keys=missing_keys,
         collection=collection,
         client=client,
     )
+    stop = time.time()
+    print(
+        f"Time taken to populate missing entries to MongoDB: {stop - start:.2f} seconds"
+    )
 
     # Populate DB results and new descriptions in ChromaDB
+    start = time.time()
     populate_db(entries=descriptions, chroma_client=chroma_client)
+    stop = time.time()
+    print(f"Time taken to populate DB: {stop - start:.2f} seconds")
 
+    # Retrieve from ChromaDB
+    start = time.time()
     query_texts = [
         "nature",
         "people",
@@ -134,8 +154,8 @@ def main():
         "day time",
         "night time",
         ["boy", "girl", "camera"],
+        "antifungal",
     ]
-    # Retrieve from ChromaDB
     ranked_queries = query_all_collections(
         chroma_client=chroma_client,
         query_texts=query_texts,
@@ -149,6 +169,8 @@ def main():
             for i in top_k_image_ids
         ]
         print(f"{query_text}:", json.dumps(top_k_data, indent=2))
+    stop = time.time()
+    print(f"Time taken to query ChromaDB: {stop - start:.2f} seconds")
 
 
 if __name__ == "__main__":
