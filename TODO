@@ -1,8 +1,11 @@
 Next Up
 
-[ ] Update post-VLM metadata schema to use new, canonical dates.
-[ ] Add Mongo update code to update metadata even if descriptions are not newly generated.
-[ ] Create a mongo "test" data retreiver to quickly get random datapoints.
+[X] Update post-VLM metadata schema to use new, canonical dates.
+[X] Add Mongo update code to update metadata even if descriptions are not newly generated.
+[X] Create a mongo "test" data retreiver to quickly get random datapoints.
+
+[ ] Create a date-based retrieval function.
+[ ] Add keyword-matching and BM-25 searching options and add match-based score to current method.
 
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
@@ -29,8 +32,8 @@ Tasks
         [ ] Explore lighter models
     [ ] Use pydantic for maintaining standard schema
     [ ] MongoDB
-        [ ] Add Mongo update code to update metadata even if descriptions are not newly generated.
-        [ ] Create a mongo "test" data retreiver to quickly get random datapoints.
+        [X] Add Mongo update code to update metadata even if descriptions are not newly generated.
+        [X] Create a mongo "test" data retreiver to quickly get random datapoints.
         [ ] Add simple search options
     [ ] ChromaDB
         [ ] Explore optimizations like multi-processing, hybrid-search, caching, etc.

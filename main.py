@@ -48,11 +48,52 @@ def fetch_existing(folder_dict: dict, collection: pymongo.collection.Collection)
             }
         )
         descriptions[entry_hash] = {"description": {}, "metadata": metadata}
-    found_objects, missing_keys = check_if_exists(descriptions, collection)
+    found_objects, missing_keys = check_if_exists(
+        descriptions,
+        collection,
+        required_fields=[
+            "description",
+        ],
+    )
     descriptions.update(
         found_objects
     )  # Might need error handling for mismatches in old and current metadata
     return descriptions, missing_keys
+
+
+def update_metadata(
+    descriptions: dict,
+    folder_dict: dict,
+    collection: pymongo.collection.Collection,
+):
+    updated_metadata_dict = {}
+
+    for entry_hash, data in descriptions.items():
+        fh, mh = entry_hash.split("_", 1)
+
+        meta = data.get("metadata") or {}
+        file_hash = meta.get("file_hash") or fh
+        model_hash = meta.get("model_hash") or mh
+
+        base = folder_dict.get(file_hash)
+        if base is None:
+            continue
+
+        metadata = base.copy()
+        metadata["file_hash"] = file_hash
+        metadata["model_hash"] = model_hash
+
+        model_name = meta.get("model_name")
+        api_name = meta.get("api_name")
+        if model_name and api_name:
+            metadata["api_name"] = api_name
+            metadata["model_name"] = model_name
+
+        updated_metadata_dict[f"{file_hash}_{model_hash}"] = {"metadata": metadata}
+        descriptions[entry_hash]["metadata"] = metadata
+
+    upsert_dict_objects(objects=updated_metadata_dict, collection=collection)
+    return descriptions
 
 
 def populate_missing(
@@ -117,7 +158,7 @@ def main():
     stop = time.time()
     print(f"Time taken to index folder: {stop - start:.2f} seconds")
 
-    # Read existing DB to find image descriptions
+    # Read DB to find existing image descriptions
     start = time.time()
     descriptions, missing_keys = fetch_existing(folder_dict, collection)
     stop = time.time()
@@ -125,7 +166,13 @@ def main():
         f"Time taken to fetch existing entries from MongoDB: {stop - start:.2f} seconds"
     )
 
-    # # Try to populate missing descriptions
+    # Update metadata in DB if needed (e.g. if new images were added to the folder or if the schema was updated)
+    start = time.time()
+    descriptions = update_metadata(descriptions, folder_dict, collection)
+    stop = time.time()
+    print(f"Time taken to update metadata in MongoDB: {stop - start:.2f} seconds")
+
+    # Try to populate missing descriptions
     start = time.time()
     descriptions = populate_missing(
         descriptions=descriptions,

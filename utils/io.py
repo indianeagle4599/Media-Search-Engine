@@ -424,7 +424,7 @@ def index_folder(file_root: str, verbose: bool = False):
         # Dates
         "dates": {},
         # Detailed metadata
-        "metadata": {},
+        "embedded_metadata": {},
     }
     for path, dirs, files in os.walk(file_root):
         for file in files:
@@ -446,6 +446,7 @@ def index_folder(file_root: str, verbose: bool = False):
 
             files_index[file_hash].update(
                 {
+                    "file_hash": file_hash,
                     "file_path": file_path,
                     "file_name": file,
                     "media_type": media_type,
@@ -458,7 +459,7 @@ def index_folder(file_root: str, verbose: bool = False):
             dates.update(metadata.pop("DateItems", {}))
 
             files_index[file_hash]["dates"] = resolve_dates(dates)
-            files_index[file_hash]["metadata"] = metadata
+            files_index[file_hash]["embedded_metadata"] = metadata
 
     if verbose:
         print(json.dumps(files_index, indent=2))

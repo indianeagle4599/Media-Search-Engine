@@ -56,39 +56,55 @@ def upsert_dict_objects(
 def check_if_exists(
     keys_dict: dict,
     collection: pymongo.collection.Collection,
+    required_fields: (
+        list[str] | None
+    ) = None,  # Pass nested fields as dot paths, e.g. "description.content"
 ):
-    search_keys = keys_dict.keys()
+    ids = list(keys_dict)
+    base_filter = {"_id": {"$in": ids}}
+    missing = set()
+    if required_fields:
+        for field in required_fields:
+            cursor = collection.find(
+                {**base_filter, field: {"$exists": True, "$ne": None}}
+            )
+            present = {doc["_id"] for doc in cursor}
+            missing.update(set(ids) - present)
+    found = find_dict_objects(ids, collection)
+    if not required_fields:
+        missing = set(ids) - set(found)
+    return found, list(missing)
 
-    found_objects = find_dict_objects(list(search_keys), collection)
-    found_keys = found_objects.keys()
 
-    missing_keys = set(search_keys).difference(set(found_keys))
-
-    return found_objects, list(missing_keys)
+def get_random_objects(
+    collection: pymongo.collection.Collection,
+    n: int = 1,
+    batch_size: int = 2048,
+):
+    final_result = {}
+    while n > batch_size:
+        pipeline = [{"$sample": {"size": batch_size}}]
+        result = {doc.pop("_id"): doc for doc in collection.aggregate(pipeline)}
+        final_result.update(result)
+        n -= batch_size
+    pipeline = [{"$sample": {"size": n}}]
+    result = {doc.pop("_id"): doc for doc in collection.aggregate(pipeline)}
+    final_result.update(result)
+    return final_result
 
 
 if __name__ == "__main__":
+    import random, json
+
     url = "mongodb://localhost:27017"
     collection = pymongo.MongoClient(url)["test_db"]["test"]
 
-    one_key = "key_one"
-    many_keys = [
-        "key_two",
-        "key_three",
-        "key_four",
-        "key_five",
-        "key_six",
-    ]
-    print(find_dict_objects(objects=one_key, collection=collection))
-    print(find_dict_objects(objects=many_keys, collection=collection))
-
-    one_dict = {
+    print("\nUpserting objects:")
+    dicts = {
         "key_one": {
             "name": "object_one",
             "description": "The first object.",
-        }
-    }
-    many_dicts = {
+        },
         "key_two": {
             "name": "object_two",
             "description": "The second object.",
@@ -105,10 +121,13 @@ if __name__ == "__main__":
             "name": "object_five",
             "description": "The fifth object.",
         },
-        "key_six": {
-            "name": "object_six",
-            "description": "The sixth object.",
-        },
     }
-    upsert_dict_objects(objects=one_dict, collection=collection)
-    upsert_dict_objects(objects=many_dicts, collection=collection)
+    upsert_dict_objects(objects=dicts, collection=collection)
+
+    k = 3
+    keys = random.choices(list(dicts.keys()), k=k)
+    print(f"Retrieving {k} objects by key:")
+    print(json.dumps(find_dict_objects(objects=keys, collection=collection), indent=2))
+
+    print(f"Retrieving {k} objects randomly:")
+    print(json.dumps(get_random_objects(collection=collection, n=k), indent=2))
