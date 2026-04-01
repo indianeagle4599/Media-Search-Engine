@@ -1,55 +1,51 @@
 Next Up
 
-[ ] Canonicalise date fields and create time-based retrieval options using Chroma
-[ ] Simplify schema to leverage metadata search and combine collections to improve retrieval speed, scalibility and reliability
+[X] Update post-VLM metadata schema to use new, canonical dates.
+[X] Add Mongo update code to update metadata even if descriptions are not newly generated.
+[X] Create a mongo "test" data retreiver to quickly get random datapoints.
 
-[ ] Add relevant specialisations and weighting method to improve mult-collection retrieval
+[ ] Create a date-based retrieval function.
+[ ] Add keyword-matching and BM-25 searching options and add match-based score to current method.
 
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
 
 Tasks
 
-[ ] Make an initial root reader and file tracker
-    [ ] Add date tracker for context and metadata
-        [ ] Create a canonical date manager
-    [ ] Design metadata schema
+[ ] File tracker improvements
+    [ ] Simplify metadata schema further - condense and retain fewer metadata fields (do after adding other file support) 
     [ ] Normalize and convert files and create a structured local file manager
         [ ] Create a simple, temp-file type converter (a volatile proxy), to pass directly unsupported images to the LLM.
+        [ ] Allow analysis support for avif and other image file types.
         [ ] File renaming as necessary
     [ ] Effectively extract metadata
-        [ ] Support JPEG metadata extraction using exif
-            [X] Whitelist tag, Metadata clean up and normalization
-            [X] Condense and passing clearer information in metadata
-            [ ] Fix GPS coordinate calculation and support
+        [ ] Improve GPS metadata extraction in JPEGs
+            [ ] Create one clean and normalised object
+            [ ] Get location names and/or geocodes
         [ ] Support PNG and HEIF metadata extraction
         [ ] Support metadata extraction for other file types like TIF, SVG, etc.
     [ ] Video metadata extraction and indexing support
-[ ] Create media indexer
-    [X] VLM
-        [X] Connect to Gemini
+[ ] Media indexer improvements
+    [ ] VLM
+        [ ] Create a multi-API setup to leverage free tier extractions
         [ ] Check options for batch predictions
-    [ ] Design clear and specialized prompts for detailed indexing
-        [X] Identify docs, screenshots, animated images, artwork, photos, etc
-        [X] Ensure all relevant info is cleanly and effectively extracted
-    [ ] Design response and metadata management schema
-        [ ] Check pydantic for maintaining standard schema
+        [ ] Explore lighter models
+    [ ] Use pydantic for maintaining standard schema
     [ ] MongoDB
-        [X] Create a JSON DB (like MongoDB) to store content
+        [X] Add Mongo update code to update metadata even if descriptions are not newly generated.
+        [X] Create a mongo "test" data retreiver to quickly get random datapoints.
         [ ] Add simple search options
     [ ] ChromaDB
-        [X] Create a Vector DB setup to populate in a more abstract way
-        [X] Design simpler schema to store embeddings and relevant fields in Chroma metadata
-        [X] Design adapters and create syncing code to quickly sync chromaDB with mongoDB
-        [ ] Design and test different embedding models for improved and effective semantic searching
-        [ ] Design dense, multi-field semantic search
-    [ ] Create Retrieval setup
-        [X] Create an initial ChromaDB setup with simple visual evaluation.
+        [ ] Explore optimizations like multi-processing, hybrid-search, caching, etc.
         [ ] Allow simple retrieval options like dates, standard text matching, etc.
-        [ ] Create context-based retrieval options to leverage extracted JSON objects and more specialised searching.
-            [X] Create a naive all-collection retrieval and combination function
-            [ ] Add relevant specialisations and weighting method to improve mult-collection retrieval
-            [ ] Explore more effective embedding creation methods from structured JSONs to improve retrieval quality.
-[ ] Create simple chat-based UI to find files
-[ ] Allow analysis support for avif and other image file types.
-[ ] Create a random data downloader
+        [ ] Create retrieval evaluation setup
+            [ ] Create a random data downloader
+[ ] UI
+    [ ] Create simple UI to find and display files
+    [ ] Add a Chat option as relevant.
+    [ ] Add RAG-based search features.
+    [ ] Add Agentic search utils for specialised searching.
+[ ] Good SDE practices
+    [ ] Leverage branches for feature development.
+    [ ] Setup Pytest and design test cases for various functions.
+    [ ] Add docstrings

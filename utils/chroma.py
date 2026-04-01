@@ -5,6 +5,7 @@ Contains utilities to create, update and use a chromadb for storing and querying
 """
 
 import chromadb, json
+from datetime import datetime
 from chromadb.utils.batch_utils import create_batches
 from chromadb.utils.embedding_functions.ollama_embedding_function import (
     OllamaEmbeddingFunction,
@@ -71,7 +72,19 @@ collection_type_map = {
     # and a hybrid search strategy that combines lexical and semantic search
     "word": ["lexical_keywords", "other_data"],
     # Absolute (non-semantic)
-    "absolute": ["estimated_date"],
+    "absolute": [
+        "estimated_date",
+        "master_date",
+        "creation_date",
+        "modification_date",
+        "date_reliability",
+        "index_date",
+        "estimated_ts",
+        "master_ts",
+        "creation_ts",
+        "modification_ts",
+        "index_ts",
+    ],
 }
 collection_type_rev_map = {v_i: k for k, v in collection_type_map.items() for v_i in v}
 
@@ -136,16 +149,44 @@ def combine_extracted_fields(extracted_fields: dict, combination_dict: dict):
     return combined_fields
 
 
+def date_to_ts(date_str: str):
+    try:
+        ts = float(datetime.fromisoformat(date_str).timestamp())
+        return ts
+    except Exception as e:
+        print(f"Error converting date string '{date_str}' to timestamp:", e)
+        return None
+
+
+def date_dict_to_ts(date_dict: dict):
+    ts_dict = {}
+    for key, date_str in date_dict.items():
+        key_ts = key.replace("date", "ts")
+        ts = date_to_ts(date_str)
+        if ts:
+            ts_dict[key_ts] = ts
+    return ts_dict
+
+
 def extract_metadata_fields(metadata_object: dict):
+    date_object = metadata_object.get("dates") or {}
+    clean_date_object = {
+        "master_date": date_object.get("master_date"),
+        "creation_date": date_object.get("true_creation_date"),
+        "modification_date": date_object.get("true_modification_date"),
+        "index_date": date_object.get("index_date"),
+    }
+    ts_object = date_dict_to_ts(clean_date_object)
+    clean_date_object["date_reliability"] = (
+        date_object.get("date_reliability") or "unknown"
+    )
     return {
         "absolute": {
-            # Will need to fix canonicalization and resolution of dates
             # From metadata object
-            "creation_date": metadata_object.get("creation_date"),
-            "modification_date": metadata_object.get("modification_date"),
-            "index_date": metadata_object.get("index_date"),
+            **clean_date_object,
+            **ts_object,
             # From extracted_metadata field
-            ## None yet. Need to add Exif tags.
+            ## None yet. Need to either add Exif tags or clean up io.py for cleaner metadata extraction
         },
     }
 
@@ -177,6 +218,7 @@ def extract_description_fields(description_object: dict):
         "intent": context_object.get("intent"),  # May need to handle "/"
         "composition": context_object.get("composition"),
         "estimated_date": context_object.get("estimated_date"),
+        "estimated_ts": date_to_ts(context_object.get("estimated_date")),
     }
 
     combined_fields = combine_extracted_fields(
@@ -204,12 +246,13 @@ def classify_by_field_types(entries: dict, verbose: bool = False):
         "word": {},
         "absolute": {},
     }
+    metadata_dict = {}
     for entry_hash, entry_object in entries.items():
         metadata = entry_object.get("metadata")
         if metadata:
             extracted_fields = extract_metadata_fields(metadata_object=metadata)
-            if entry_object["description"]:
-                description = entry_object.get("description")
+            description = entry_object.get("description")
+            if description:
                 extracted_fields = merge_dicts(
                     extracted_fields,
                     extract_description_fields(description_object=description),
@@ -217,6 +260,9 @@ def classify_by_field_types(entries: dict, verbose: bool = False):
                 if verbose:
                     print(json.dumps(extracted_fields, indent=2))
             for field_type, field_object in extracted_fields.items():
+                if field_type == "absolute":
+                    metadata_dict[entry_hash] = field_object
+                    continue
                 for field_name, field_value in field_object.items():
                     if field_name in class_wise_db_dict[field_type]:
                         class_wise_db_dict[field_type][field_name][
@@ -226,7 +272,7 @@ def classify_by_field_types(entries: dict, verbose: bool = False):
                         class_wise_db_dict[field_type][field_name] = {
                             entry_hash: field_value
                         }
-
+    class_wise_db_dict["absolute"] = metadata_dict
     if verbose:
         print(json.dumps(class_wise_db_dict, indent=2))
 
@@ -279,22 +325,33 @@ def populate_db(
                             if id in missing_ids:
                                 new_ids.append(id)
                                 new_documents.append(document)
-                        batches = create_batches(
-                            chroma_client, ids=new_ids, documents=new_documents
-                        )
+                        ids, documents = new_ids, new_documents
                     else:
                         continue
+
+                if field_type == "sentence" and field_name == "context_narrative":
+                    # Upsert absolute fields to a one collection to allow simpler searches
+                    absolute_fields = class_wise_db_dict.pop("absolute", {})
+
+                    metadatas_list = [absolute_fields.get(id) for id in ids]
+                    batches = create_batches(
+                        chroma_client,
+                        ids=ids,
+                        metadatas=metadatas_list,
+                        documents=documents,
+                    )
+                    for batch_ids, _, batch_metadatas, batch_documents in batches:
+                        collection.upsert(
+                            ids=batch_ids,
+                            metadatas=batch_metadatas,
+                            documents=batch_documents,
+                        )
                 else:
                     batches = create_batches(
                         chroma_client, ids=ids, documents=documents
                     )
-
-                for batch_ids, _, _, batch_documents in batches:
-                    collection.upsert(ids=batch_ids, documents=batch_documents)
-
-            elif field_type == "absolute":
-                # NO EMBEDDINGS, create a collection with all flat, non-semantic fields
-                pass
+                    for batch_ids, _, _, batch_documents in batches:
+                        collection.upsert(ids=batch_ids, documents=batch_documents)
 
 
 def semantic_search_collection(
@@ -419,9 +476,8 @@ def query_all_collections(
         "query_text": [],
         "collection": [],
     }
-    collections = chroma_client.list_collections()
-    for col in collections:
-        col_name = col.name if hasattr(col, "name") else col
+    collection_names = collection_dict.keys()
+    for col_name in collection_names:
         col_type = collection_type_rev_map.get(col_name) or "sentence"
 
         collection_ef = collection_ef_map.get(col_type)
