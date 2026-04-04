@@ -198,10 +198,11 @@ def main():
         "people",
         "party",
         "daytime",
-        "day time",
         "night time",
         ["boy", "girl", "camera"],
         "antifungal",
+        ["bull", "monk"],
+        "find me a photo of a rabbit in the snow",
     ]
     ranked_queries = query_all_collections(
         chroma_client=chroma_client,

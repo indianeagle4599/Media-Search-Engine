@@ -5,7 +5,7 @@ Next Up
 [X] Create a mongo "test" data retreiver to quickly get random datapoints.
 
 [ ] Create a date-based retrieval function.
-[ ] Add keyword-matching and BM-25 searching options and add match-based score to current method.
+[X] Add keyword-matching or BM-25 searching options and add match-based score to current method.
 
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
@@ -38,13 +38,15 @@ Tasks
     [ ] ChromaDB
         [ ] Explore optimizations like multi-processing, hybrid-search, caching, etc.
         [ ] Allow simple retrieval options like dates, standard text matching, etc.
+            [X] Lexical matching
+            [ ] Date-search
         [ ] Create retrieval evaluation setup
             [ ] Create a random data downloader
+    [ ] Add RAG-based search features.
+    [ ] Add Agentic search utils for specialised searching.
 [ ] UI
     [ ] Create simple UI to find and display files
     [ ] Add a Chat option as relevant.
-    [ ] Add RAG-based search features.
-    [ ] Add Agentic search utils for specialised searching.
 [ ] Good SDE practices
     [ ] Leverage branches for feature development.
     [ ] Setup Pytest and design test cases for various functions.

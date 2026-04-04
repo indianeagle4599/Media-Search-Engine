@@ -4,8 +4,10 @@ chroma.py
 Contains utilities to create, update and use a chromadb for storing and querying from the descriptions of all images.
 """
 
-import chromadb, json
+import json, re
 from datetime import datetime
+
+import chromadb
 from chromadb.utils.batch_utils import create_batches
 from chromadb.utils.embedding_functions.ollama_embedding_function import (
     OllamaEmbeddingFunction,
@@ -15,6 +17,31 @@ from chromadb.utils.embedding_functions import (
 )
 
 import pandas as pd
+
+STOPWORDS = set(
+    [
+        "the",
+        "is",
+        "in",
+        "and",
+        "to",
+        "of",
+        "a",
+        "that",
+        "it",
+        "with",
+        "as",
+        "for",
+        "was",
+        "on",
+        "by",
+        "this",
+        "are",
+        "be",
+        "or",
+        "from",
+    ]
+)
 
 field_type_map = {
     # Sentence-like
@@ -58,11 +85,18 @@ collection_dict = {
     "other_data": ["metadata_relevance"],
 }
 field_weight_dict = {
+    # semantic search weights
     "content_narrative": 1.0,
     "context_narrative": 1.0,
     "lexical_keywords": 0.7,
     "ocr_content": 0.4,
     "other_data": 0.1,
+    # lexical search weights
+    "content_narrative_lexical": 0.8,
+    "context_narrative_lexical": 0.8,
+    "lexical_keywords_lexical": 1.0,
+    "ocr_content_lexical": 0.9,
+    "other_data_lexical": 0.5,
 }
 
 collection_type_map = {
@@ -98,6 +132,22 @@ collection_ef_map = {
     "list": minilm_ef,
     "word": minilm_ef,
 }
+
+
+def tokenize_document(document: str):
+    text = document.lower().replace("\n", " ")
+    text = re.sub(r"[^a-z0-9\s]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    tokens = [t for t in text.split() if len(t) > 1 and t not in STOPWORDS]
+    token_string = " ".join(tokens)
+    token_count = len(tokens)
+
+    token_dict = {
+        "tokens": tokens,
+        "token_string": token_string,
+        "token_count": token_count,
+    }
+    return token_dict
 
 
 def prep_dict_for_upsert(field_dict: dict):
@@ -291,6 +341,23 @@ def merge_dicts(dict1: dict, dict2: dict):
     return dict1
 
 
+def upsert_batch_to_collection(collection, batches):
+    for batch_ids, _, batch_metadatas, batch_documents in batches:
+        if batch_metadatas is None:
+            batch_metadatas = [None] * len(batch_ids)
+        for i in range(len(batch_ids)):
+            tokens_dict = tokenize_document(batch_documents[i])
+            if batch_metadatas and isinstance(batch_metadatas[i], dict):
+                batch_metadatas[i].update(tokens_dict)
+            else:
+                batch_metadatas[i] = tokens_dict
+        collection.upsert(
+            ids=batch_ids,
+            metadatas=batch_metadatas,
+            documents=batch_documents,
+        )
+
+
 def populate_db(
     entries: dict,
     chroma_client: chromadb.PersistentClient,
@@ -331,7 +398,7 @@ def populate_db(
 
                 if field_type == "sentence" and field_name == "context_narrative":
                     # Upsert absolute fields to a one collection to allow simpler searches
-                    absolute_fields = class_wise_db_dict.pop("absolute", {})
+                    absolute_fields = class_wise_db_dict.get("absolute", {})
 
                     metadatas_list = [absolute_fields.get(id) for id in ids]
                     batches = create_batches(
@@ -340,18 +407,77 @@ def populate_db(
                         metadatas=metadatas_list,
                         documents=documents,
                     )
-                    for batch_ids, _, batch_metadatas, batch_documents in batches:
-                        collection.upsert(
-                            ids=batch_ids,
-                            metadatas=batch_metadatas,
-                            documents=batch_documents,
-                        )
                 else:
                     batches = create_batches(
                         chroma_client, ids=ids, documents=documents
                     )
-                    for batch_ids, _, _, batch_documents in batches:
-                        collection.upsert(ids=batch_ids, documents=batch_documents)
+                upsert_batch_to_collection(collection, batches)
+
+
+def lexical_search_collection(
+    collection: chromadb.Collection, query_dict: dict, n_results: int = 50
+):
+    query_results_dict = {
+        "ids": [],
+        "documents": [],
+        "distances": [],
+        "rank": [],
+        "query_text": [],
+        "collection": [],
+    }
+
+    for query_text in query_dict.keys():
+        tokens_dict = tokenize_document(query_text)
+        query_tokens = set(tokens_dict.get("tokens", []))
+        query_token_string = tokens_dict.get("token_string", "")
+
+        if not query_tokens:
+            continue
+        elif len(query_tokens) == 1:
+            where_clause = {"tokens": {"$contains": list(query_tokens)[0]}}
+        else:
+            where_clause = {
+                "$or": [{"tokens": {"$contains": token}} for token in query_tokens]
+            }
+
+        query_result = collection.get(
+            where=where_clause,
+            include=["documents", "metadatas"],
+        )
+
+        ids = query_result.get("ids", [])
+        documents = query_result.get("documents", [])
+        metadatas = query_result.get("metadatas", [])
+
+        scored = []
+        for id_, doc_, meta_ in zip(ids, documents, metadatas):
+            meta_ = meta_ or {}
+            doc_tokens = set(meta_.get("tokens", []))
+            doc_token_string = meta_.get("token_string", "")
+
+            token_overlap = len(query_tokens & doc_tokens)
+            substring_bonus = (
+                2
+                if query_token_string and query_token_string in doc_token_string
+                else 0
+            )
+            score = token_overlap + substring_bonus
+
+            if score > 0:
+                scored.append((id_, doc_, score))
+
+        scored.sort(key=lambda x: x[2], reverse=True)
+        scored = scored[:n_results]
+
+        for rank, (id_, doc_, score_) in enumerate(scored, start=1):
+            query_results_dict["ids"].append(id_)
+            query_results_dict["documents"].append(doc_)
+            query_results_dict["distances"].append(-float(score_))
+            query_results_dict["rank"].append(rank)
+            query_results_dict["query_text"].append(query_text)
+            query_results_dict["collection"].append(f"{collection.name}_lexical")
+
+    return query_results_dict
 
 
 def semantic_search_collection(
@@ -492,12 +618,29 @@ def query_all_collections(
             qt: query_embedding_cache.get(qt, {}).get(id(collection_ef)) or []
             for qt in query_embedding_cache
         }
-        query_results_dict = semantic_search_collection(
-            collection=collection, query_dict=query_dict, n_results=n_results
+        # Run lexical and keyword based search
+        lexical_query_results_dict = lexical_search_collection(
+            collection=collection,
+            query_dict=query_dict,
+            n_results=min(n_results * 50, 500),
         )
-        if query_results_dict:
+        if lexical_query_results_dict:
             for key in combined_query_results:
-                combined_query_results[key].extend(query_results_dict.get(key, []))
+                combined_query_results[key].extend(
+                    lexical_query_results_dict.get(key, [])
+                )
+
+        # Run Semantic and meaning based search
+        semantic_query_results_dict = semantic_search_collection(
+            collection=collection,
+            query_dict=query_dict,
+            n_results=min(n_results * 10, 500),
+        )
+        if semantic_query_results_dict:
+            for key in combined_query_results:
+                combined_query_results[key].extend(
+                    semantic_query_results_dict.get(key, [])
+                )
 
     if combined_query_results:
         combined_query_results = pd.DataFrame(combined_query_results)
