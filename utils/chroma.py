@@ -4,8 +4,8 @@ chroma.py
 Contains utilities to create, update and use a chromadb for storing and querying from the descriptions of all images.
 """
 
-import json, re
-from datetime import datetime
+import json, re, calendar
+from datetime import datetime, timezone
 
 import chromadb
 from chromadb.utils.batch_utils import create_batches
@@ -42,6 +42,58 @@ STOPWORDS = set(
         "from",
     ]
 )
+
+DATE_MASK_PATTERN = re.compile(
+    r"([0-9Xx]{4}-[0-9Xx]{2}-[0-9Xx]{2}[Tt][0-9Xx]{2}:[0-9Xx]{2}:[0-9Xx]{2})"
+)
+SEMANTIC_DATE_MASKS = {
+    # Existing Times of Day
+    "midnight": ("XXXX-XX-XXT00:00:00", "XXXX-XX-XXT00:59:59"),
+    "dawn": ("XXXX-XX-XXT05:00:00", "XXXX-XX-XXT06:59:59"),
+    "sunrise": ("XXXX-XX-XXT06:00:00", "XXXX-XX-XXT07:59:59"),
+    "morning": ("XXXX-XX-XXT06:00:00", "XXXX-XX-XXT11:59:59"),
+    "noon": ("XXXX-XX-XXT12:00:00", "XXXX-XX-XXT12:59:59"),
+    "afternoon": ("XXXX-XX-XXT13:00:00", "XXXX-XX-XXT16:59:59"),
+    "golden hour": ("XXXX-XX-XXT17:00:00", "XXXX-XX-XXT18:59:59"),
+    "sunset": ("XXXX-XX-XXT18:00:00", "XXXX-XX-XXT18:59:59"),
+    "twilight": ("XXXX-XX-XXT18:00:00", "XXXX-XX-XXT19:59:59"),
+    "evening": ("XXXX-XX-XXT17:00:00", "XXXX-XX-XXT20:59:59"),
+    "night": ("XXXX-XX-XXT20:00:00", "XXXX-XX-XXT23:59:59"),
+    # Business / Extended Times
+    "business hours": ("XXXX-XX-XXT09:00:00", "XXXX-XX-XXT17:59:59"),
+    "working hours": ("XXXX-XX-XXT09:00:00", "XXXX-XX-XXT17:59:59"),
+    "lunch": ("XXXX-XX-XXT12:00:00", "XXXX-XX-XXT13:59:59"),
+    "lunchtime": ("XXXX-XX-XXT12:00:00", "XXXX-XX-XXT13:59:59"),
+    # Decades & Centuries
+    "70s": ("197X-XX-XXTXX:XX:XX", "197X-XX-XXTXX:XX:XX"),
+    "1970s": ("197X-XX-XXTXX:XX:XX", "197X-XX-XXTXX:XX:XX"),
+    "80s": ("198X-XX-XXTXX:XX:XX", "198X-XX-XXTXX:XX:XX"),
+    "1980s": ("198X-XX-XXTXX:XX:XX", "198X-XX-XXTXX:XX:XX"),
+    "90s": ("199X-XX-XXTXX:XX:XX", "199X-XX-XXTXX:XX:XX"),
+    "1990s": ("199X-XX-XXTXX:XX:XX", "199X-XX-XXTXX:XX:XX"),
+    "2000s": ("200X-XX-XXTXX:XX:XX", "200X-XX-XXTXX:XX:XX"),
+    "2010s": ("201X-XX-XXTXX:XX:XX", "201X-XX-XXTXX:XX:XX"),
+    "2020s": ("202X-XX-XXTXX:XX:XX", "202X-XX-XXTXX:XX:XX"),
+    "20th century": ("19XX-XX-XXTXX:XX:XX", "19XX-XX-XXTXX:XX:XX"),
+    "21st century": ("20XX-XX-XXTXX:XX:XX", "20XX-XX-XXTXX:XX:XX"),
+    # Day-Level Month Segments
+    "start of month": ("XXXX-XX-01TXX:XX:XX", "XXXX-XX-10TXX:XX:XX"),
+    "early month": ("XXXX-XX-01TXX:XX:XX", "XXXX-XX-10TXX:XX:XX"),
+    "mid month": ("XXXX-XX-11TXX:XX:XX", "XXXX-XX-20TXX:XX:XX"),
+    "middle of month": ("XXXX-XX-11TXX:XX:XX", "XXXX-XX-20TXX:XX:XX"),
+    "end of month": ("XXXX-XX-21TXX:XX:XX", "XXXX-XX-31TXX:XX:XX"),
+    "late month": ("XXXX-XX-21TXX:XX:XX", "XXXX-XX-31TXX:XX:XX"),
+    # Seasons (Non-Wrapping)
+    "spring": ("XXXX-03-XXTXX:XX:XX", "XXXX-05-XXTXX:XX:XX"),
+    "summer": ("XXXX-06-XXTXX:XX:XX", "XXXX-08-XXTXX:XX:XX"),
+    "autumn": ("XXXX-09-XXTXX:XX:XX", "XXXX-11-XXTXX:XX:XX"),
+    "fall": ("XXXX-09-XXTXX:XX:XX", "XXXX-11-XXTXX:XX:XX"),
+    # Holidays & Notable Periods
+    "holiday season": ("XXXX-11-20TXX:XX:XX", "XXXX-12-31TXX:XX:XX"),
+    "christmas": ("XXXX-12-24TXX:XX:XX", "XXXX-12-26TXX:XX:XX"),
+    "new year's eve": ("XXXX-12-31TXX:XX:XX", "XXXX-12-31TXX:XX:XX"),
+    "new year's day": ("XXXX-01-01TXX:XX:XX", "XXXX-01-01TXX:XX:XX"),
+}
 
 field_type_map = {
     # Sentence-like
@@ -97,6 +149,8 @@ field_weight_dict = {
     "lexical_keywords_lexical": 1.0,
     "ocr_content_lexical": 0.9,
     "other_data_lexical": 0.5,
+    # chronological search weights
+    "context_narrative_chrono": 1.0,
 }
 
 collection_type_map = {
@@ -134,6 +188,13 @@ collection_ef_map = {
 }
 
 
+def normalize_query_text(query_text: str):
+    if isinstance(query_text, list):
+        return [normalize_query_text(q) for q in query_text]
+    elif isinstance(query_text, str):
+        return query_text.strip().lower()
+
+
 def tokenize_document(document: str):
     text = document.lower().replace("\n", " ")
     text = re.sub(r"[^a-z0-9\s]+", " ", text)
@@ -142,12 +203,11 @@ def tokenize_document(document: str):
     token_string = " ".join(tokens)
     token_count = len(tokens)
 
-    token_dict = {
+    return {
         "tokens": tokens,
         "token_string": token_string,
         "token_count": token_count,
     }
-    return token_dict
 
 
 def prep_dict_for_upsert(field_dict: dict):
@@ -199,22 +259,42 @@ def combine_extracted_fields(extracted_fields: dict, combination_dict: dict):
     return combined_fields
 
 
-def date_to_ts(date_str: str):
+def split_date(date_str: str):
     try:
-        ts = float(datetime.fromisoformat(date_str).timestamp())
-        return ts
+        dt = datetime.fromisoformat(date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return {
+            "year": dt.year,
+            "month": dt.month,
+            "day": dt.day,
+            "hour": dt.hour,
+            "minute": dt.minute,
+            "second": dt.second,
+            "microsecond": dt.microsecond,
+            "ts": float(dt.timestamp()),
+            "tz_offset_minutes": (
+                int(dt.utcoffset().total_seconds() // 60) if dt.utcoffset() else 0
+            ),
+        }
     except Exception as e:
-        print(f"Error converting date string '{date_str}' to timestamp:", e)
+        print(f"Error splitting date string '{date_str}' to smaller parts:", e)
         return None
 
 
 def date_dict_to_ts(date_dict: dict):
     ts_dict = {}
     for key, date_str in date_dict.items():
-        key_ts = key.replace("date", "ts")
-        ts = date_to_ts(date_str)
-        if ts:
-            ts_dict[key_ts] = ts
+        if not date_str:
+            continue
+
+        date_parts = split_date(date_str)
+        if not date_parts:
+            continue
+
+        for date_part in date_parts:
+            date_item_key = key.replace("date", date_part)
+            ts_dict[date_item_key] = date_parts[date_part]
     return ts_dict
 
 
@@ -268,7 +348,7 @@ def extract_description_fields(description_object: dict):
         "intent": context_object.get("intent"),  # May need to handle "/"
         "composition": context_object.get("composition"),
         "estimated_date": context_object.get("estimated_date"),
-        "estimated_ts": date_to_ts(context_object.get("estimated_date")),
+        **date_dict_to_ts({"estimated_date": context_object.get("estimated_date")}),
     }
 
     combined_fields = combine_extracted_fields(
@@ -414,6 +494,278 @@ def populate_db(
                 upsert_batch_to_collection(collection, batches)
 
 
+def count_mask_specificity(start_mask: str, end_mask: str):
+    if not start_mask or not end_mask:
+        return 0
+
+    s_parts = re.fullmatch(
+        r"([0-9X]{4})-([0-9X]{2})-([0-9X]{2})T([0-9X]{2}):([0-9X]{2}):([0-9X]{2})",
+        start_mask.upper(),
+    )
+    e_parts = re.fullmatch(
+        r"([0-9X]{4})-([0-9X]{2})-([0-9X]{2})T([0-9X]{2}):([0-9X]{2}):([0-9X]{2})",
+        end_mask.upper(),
+    )
+    if not s_parts or not e_parts:
+        return 0
+
+    score = 0
+    for s, e in zip(s_parts.groups(), e_parts.groups()):
+        s_all_x = set(s) == {"X"}
+        e_all_x = set(e) == {"X"}
+
+        if s_all_x and e_all_x:
+            continue
+        if "X" not in s and "X" not in e and s == e:
+            score += 2
+        else:
+            score += 1
+    return score
+
+
+def _parse_mask_groups(date_mask: str):
+    m = re.fullmatch(
+        r"([0-9X]{4})-([0-9X]{2})-([0-9X]{2})T([0-9X]{2}):([0-9X]{2}):([0-9X]{2})",
+        date_mask.upper(),
+    )
+    if not m:
+        raise ValueError(
+            "date_mask must match YYYY-MM-DDTHH:MM:SS using digits and/or X"
+        )
+    return m.groups()
+
+
+def _masked_int_bounds(mask: str, lo_default: int, hi_default: int):
+    mask = mask.upper()
+    if set(mask) == {"X"}:
+        return lo_default, hi_default
+    lo = int(mask.replace("X", "0"))
+    hi = int(mask.replace("X", "9"))
+    return lo, hi
+
+
+def mask_to_datetime_bounds(date_mask: str):
+    year_s, month_s, day_s, hour_s, minute_s, second_s = _parse_mask_groups(date_mask)
+
+    year_lo, year_hi = _masked_int_bounds(year_s, 1, 9999)
+    month_lo, month_hi = _masked_int_bounds(month_s, 1, 12)
+    hour_lo, hour_hi = _masked_int_bounds(hour_s, 0, 23)
+    minute_lo, minute_hi = _masked_int_bounds(minute_s, 0, 59)
+    second_lo, second_hi = _masked_int_bounds(second_s, 0, 59)
+
+    year_lo = max(1, min(year_lo, 9999))
+    year_hi = max(1, min(year_hi, 9999))
+    month_lo = max(1, min(month_lo, 12))
+    month_hi = max(1, min(month_hi, 12))
+
+    max_day_lo = calendar.monthrange(year_lo, month_lo)[1]
+    max_day_hi = calendar.monthrange(year_hi, month_hi)[1]
+
+    if set(day_s.upper()) == {"X"}:
+        day_lo, day_hi = 1, max_day_hi
+    else:
+        day_lo = int(day_s.upper().replace("X", "0"))
+        day_hi = int(day_s.upper().replace("X", "9"))
+        day_lo = max(1, min(day_lo, max_day_lo))
+        day_hi = max(1, min(day_hi, max_day_hi))
+
+    start_dt = datetime(
+        year_lo,
+        month_lo,
+        day_lo,
+        hour_lo,
+        minute_lo,
+        second_lo,
+        tzinfo=timezone.utc,
+    )
+    end_dt = datetime(
+        year_hi,
+        month_hi,
+        day_hi,
+        hour_hi,
+        minute_hi,
+        second_hi,
+        tzinfo=timezone.utc,
+    )
+
+    if start_dt > end_dt:
+        raise ValueError(f"Invalid masked datetime range derived from {date_mask}")
+
+    return start_dt, end_dt
+
+
+def mask_to_ts_bounds(date_mask: str):
+    start_dt, end_dt = mask_to_datetime_bounds(date_mask)
+    return float(start_dt.timestamp()), float(end_dt.timestamp())
+
+
+def build_timestamp_where_clause(date_field: str, start_mask: str, end_mask: str):
+    valid_fields = {
+        "estimated_date": "estimated_ts",
+        "creation_date": "creation_ts",
+        "modification_date": "modification_ts",
+        "master_date": "master_ts",
+    }
+    if date_field not in valid_fields:
+        raise ValueError(f"Invalid date_field: {date_field}")
+
+    ts_field = valid_fields[date_field]
+    start_ts, _ = mask_to_ts_bounds(start_mask)
+    _, end_ts = mask_to_ts_bounds(end_mask)
+
+    if start_ts > end_ts:
+        raise ValueError(
+            f"Invalid timestamp range: start_mask={start_mask}, end_mask={end_mask}"
+        )
+
+    return {
+        "$and": [
+            {ts_field: {"$gte": start_ts}},
+            {ts_field: {"$lte": end_ts}},
+        ]
+    }
+
+
+def combine_where_clauses(*clauses):
+    flat = []
+    for clause in clauses:
+        if not clause:
+            continue
+        if isinstance(clause, dict) and "$and" in clause and len(clause) == 1:
+            flat.extend(clause["$and"])
+        else:
+            flat.append(clause)
+
+    if not flat:
+        return None
+    if len(flat) == 1:
+        return flat[0]
+    return {"$and": flat}
+
+
+def extract_date_filter_from_query(query_text: str):
+    q = query_text.strip()
+    q_lower = q.lower()
+
+    # 1) semantic phrases first
+    for key in sorted(SEMANTIC_DATE_MASKS, key=len, reverse=True):
+        if key in q_lower:
+            clean = re.sub(re.escape(key), "", q, flags=re.IGNORECASE).strip()
+            clean = re.sub(r"\s+", " ", clean).strip()
+            return {
+                "start_mask": SEMANTIC_DATE_MASKS[key][0].upper(),
+                "end_mask": SEMANTIC_DATE_MASKS[key][1].upper(),
+                "clean_query_text": clean.lower(),
+                "matched_semantic_key": key,
+                "is_pure_date_query": len(tokenize_document(clean).get("tokens", []))
+                == 0,
+            }
+
+    # 2) extract all explicit masks, independent of separator details
+    masks = [m.upper() for m in DATE_MASK_PATTERN.findall(q)]
+    if len(masks) >= 2:
+        start_mask, end_mask = masks[0], masks[1]
+        clean = DATE_MASK_PATTERN.sub("", q)
+        clean = re.sub(r"\bto\b", " ", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return {
+            "start_mask": start_mask,
+            "end_mask": end_mask,
+            "clean_query_text": clean.lower(),
+            "matched_semantic_key": None,
+            "is_pure_date_query": len(tokenize_document(clean).get("tokens", [])) == 0,
+        }
+
+    # 3) single explicit mask
+    if len(masks) == 1:
+        mask = masks[0]
+        clean = DATE_MASK_PATTERN.sub("", q)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return {
+            "start_mask": mask,
+            "end_mask": mask,
+            "clean_query_text": clean.lower(),
+            "matched_semantic_key": None,
+            "is_pure_date_query": len(tokenize_document(clean).get("tokens", [])) == 0,
+        }
+
+    # 4) no date found
+    return {
+        "start_mask": None,
+        "end_mask": None,
+        "clean_query_text": q.lower(),
+        "matched_semantic_key": None,
+        "is_pure_date_query": False,
+    }
+
+
+def chronological_search_collection(
+    collection: chromadb.Collection,
+    query_texts: list[str],
+    date_field: str = "master_date",
+    n_results: int = 50,
+):
+    query_results_dict = {
+        "ids": [],
+        "documents": [],
+        "distances": [],
+        "rank": [],
+        "query_text": [],
+        "collection": [],
+    }
+
+    ts_field = date_field.replace("_date", "_ts")
+
+    for query_text in query_texts:
+        date_info = extract_date_filter_from_query(query_text)
+        start_mask = date_info.get("start_mask")
+        end_mask = date_info.get("end_mask")
+
+        if not start_mask or not end_mask:
+            continue
+
+        where_clause = build_timestamp_where_clause(
+            date_field=date_field,
+            start_mask=start_mask,
+            end_mask=end_mask,
+        )
+
+        query_result = collection.get(
+            where=where_clause,
+            include=["documents", "metadatas"],
+        )
+
+        ids = query_result.get("ids", [])
+        documents = query_result.get("documents", [])
+        metadatas = query_result.get("metadatas", [])
+
+        specificity_score = count_mask_specificity(start_mask, end_mask)
+
+        scored = []
+        for id_, doc_, meta_ in zip(ids, documents, metadatas):
+            meta_ = meta_ or {}
+            reliability_bonus = 1 if meta_.get("date_reliability") == "high" else 0
+            ts_value = meta_.get(ts_field)
+            recency_tiebreak = (
+                ts_value if isinstance(ts_value, (int, float)) else float("-inf")
+            )
+            score = specificity_score + reliability_bonus
+            scored.append((id_, doc_, score, recency_tiebreak))
+
+        scored.sort(key=lambda x: (x[2], x[3]), reverse=True)
+        scored = scored[:n_results]
+
+        for rank, (id_, doc_, score_, _) in enumerate(scored, start=1):
+            query_results_dict["ids"].append(id_)
+            query_results_dict["documents"].append(doc_)
+            query_results_dict["distances"].append(-float(score_))
+            query_results_dict["rank"].append(rank)
+            query_results_dict["query_text"].append(query_text)
+            query_results_dict["collection"].append(f"{collection.name}_chrono")
+
+    return query_results_dict
+
+
 def lexical_search_collection(
     collection: chromadb.Collection, query_dict: dict, n_results: int = 50
 ):
@@ -427,18 +779,36 @@ def lexical_search_collection(
     }
 
     for query_text in query_dict.keys():
-        tokens_dict = tokenize_document(query_text)
+        date_info = extract_date_filter_from_query(query_text)
+
+        clean_query_text = date_info["clean_query_text"]
+        start_mask = date_info["start_mask"]
+        end_mask = date_info["end_mask"]
+
+        tokens_dict = tokenize_document(clean_query_text)
         query_tokens = set(tokens_dict.get("tokens", []))
         query_token_string = tokens_dict.get("token_string", "")
 
-        if not query_tokens:
+        token_where = None
+        if query_tokens:
+            if len(query_tokens) == 1:
+                token_where = {"tokens": {"$contains": list(query_tokens)[0]}}
+            else:
+                token_where = {
+                    "$or": [{"tokens": {"$contains": token}} for token in query_tokens]
+                }
+
+        date_where = None
+        if start_mask and end_mask:
+            date_where = build_timestamp_where_clause(
+                date_field="master_date",
+                start_mask=start_mask,
+                end_mask=end_mask,
+            )
+
+        where_clause = combine_where_clauses(token_where, date_where)
+        if not where_clause:
             continue
-        elif len(query_tokens) == 1:
-            where_clause = {"tokens": {"$contains": list(query_tokens)[0]}}
-        else:
-            where_clause = {
-                "$or": [{"tokens": {"$contains": token}} for token in query_tokens]
-            }
 
         query_result = collection.get(
             where=where_clause,
@@ -452,16 +822,19 @@ def lexical_search_collection(
         scored = []
         for id_, doc_, meta_ in zip(ids, documents, metadatas):
             meta_ = meta_ or {}
-            doc_tokens = set(meta_.get("tokens", []))
-            doc_token_string = meta_.get("token_string", "")
 
-            token_overlap = len(query_tokens & doc_tokens)
-            substring_bonus = (
-                2
-                if query_token_string and query_token_string in doc_token_string
-                else 0
-            )
-            score = token_overlap + substring_bonus
+            if not query_tokens:
+                score = 1
+            else:
+                doc_tokens = set(meta_.get("tokens", []))
+                doc_token_string = meta_.get("token_string", "")
+                token_overlap = len(query_tokens & doc_tokens)
+                substring_bonus = (
+                    2
+                    if query_token_string and query_token_string in doc_token_string
+                    else 0
+                )
+                score = token_overlap + substring_bonus
 
             if score > 0:
                 scored.append((id_, doc_, score))
@@ -525,37 +898,47 @@ def get_final_results(
     rrf_smoothing: int = 60,
     n_results: int = 5,
 ):
+    if query_results_df.empty:
+        return pd.DataFrame(columns=["ids", "score", "rank"])
+
+    relevant_df = query_results_df.copy()
+    relevant_df["query_text"] = (
+        relevant_df["query_text"].astype(str).str.strip().str.lower()
+    )
+
     if isinstance(query_text, str):
-        mask = query_results_df["query_text"] == query_text
+        mask = relevant_df["query_text"] == normalize_query_text(query_text)
     elif isinstance(query_text, list):
-        mask = query_results_df["query_text"].isin(query_text)
-    relevant_df = query_results_df[mask].copy()
+        mask = relevant_df["query_text"].isin(
+            [normalize_query_text(q) for q in query_text]
+        )
+    else:
+        return pd.DataFrame(columns=["ids", "score", "rank"])
+
+    relevant_df = relevant_df[mask].copy()
 
     if relevant_df.empty:
         return pd.DataFrame(columns=["ids", "score", "rank"])
 
-    relevant_df["ids"] = relevant_df["ids"].str[
-        :105
-    ]  # sha256 (64 chars) + "_" + sha1 (40 chars) (64+1+40 = 105)
+    relevant_df["ids"] = relevant_df["ids"].astype(str).str[:105]
     weights = relevant_df["collection"].map(field_weight_dict).fillna(0.2)
     relevant_df["rrf_score"] = weights / (relevant_df["rank"] + rrf_smoothing)
 
     rrf_vals = relevant_df.groupby("ids")["rrf_score"].sum().nlargest(n_results)
-    ranks = pd.DataFrame(
+    return pd.DataFrame(
         {
             "ids": rrf_vals.index,
             "score": rrf_vals.values,
             "rank": list(range(len(rrf_vals))),
         }
     )
-    return ranks
 
 
 def clean_query_texts(query_texts: list):
     cleaned_query_texts = set()
     for query_text in query_texts:
         if isinstance(query_text, str):
-            cleaned_query_texts.add(query_text.strip().lower())
+            cleaned_query_texts.add(normalize_query_text(query_text))
         elif isinstance(query_text, list):
             cleaned_query_texts.update(clean_query_texts(query_text))
     return list(cleaned_query_texts)
@@ -594,6 +977,10 @@ def query_all_collections(
     stop = time.time()
     print(f"Time taken to run embedding functions: {stop - start:.2f} seconds")
 
+    query_info_map = {
+        qt: extract_date_filter_from_query(qt) for qt in cleaned_query_texts
+    }
+
     combined_query_results = {
         "ids": [],
         "documents": [],
@@ -602,6 +989,7 @@ def query_all_collections(
         "query_text": [],
         "collection": [],
     }
+
     collection_names = collection_dict.keys()
     for col_name in collection_names:
         col_type = collection_type_rev_map.get(col_name) or "sentence"
@@ -614,41 +1002,63 @@ def query_all_collections(
         if collection.count() == 0:
             continue
 
-        query_dict = {
+        all_query_dict = {
             qt: query_embedding_cache.get(qt, {}).get(id(collection_ef)) or []
             for qt in query_embedding_cache
         }
-        # Run lexical and keyword based search
-        lexical_query_results_dict = lexical_search_collection(
-            collection=collection,
-            query_dict=query_dict,
-            n_results=min(n_results * 50, 500),
-        )
-        if lexical_query_results_dict:
-            for key in combined_query_results:
-                combined_query_results[key].extend(
-                    lexical_query_results_dict.get(key, [])
-                )
 
-        # Run Semantic and meaning based search
-        semantic_query_results_dict = semantic_search_collection(
-            collection=collection,
-            query_dict=query_dict,
-            n_results=min(n_results * 10, 500),
-        )
-        if semantic_query_results_dict:
-            for key in combined_query_results:
-                combined_query_results[key].extend(
-                    semantic_query_results_dict.get(key, [])
-                )
+        lexical_query_dict = {
+            qt: emb
+            for qt, emb in all_query_dict.items()
+            if not query_info_map.get(qt, {}).get("is_pure_date_query", False)
+        }
+        semantic_query_dict = lexical_query_dict
 
-    if combined_query_results:
-        combined_query_results = pd.DataFrame(combined_query_results)
+        if lexical_query_dict:
+            lexical_query_results_dict = lexical_search_collection(
+                collection=collection,
+                query_dict=lexical_query_dict,
+                n_results=min(n_results * 50, 500),
+            )
+            if lexical_query_results_dict:
+                for key in combined_query_results:
+                    combined_query_results[key].extend(
+                        lexical_query_results_dict.get(key, [])
+                    )
+
+        if col_name == "context_narrative":
+            chrono_query_results_dict = chronological_search_collection(
+                collection=collection,
+                query_texts=list(all_query_dict.keys()),
+                date_field="master_date",
+                n_results=min(n_results * 50, 500),
+            )
+            if chrono_query_results_dict:
+                for key in combined_query_results:
+                    combined_query_results[key].extend(
+                        chrono_query_results_dict.get(key, [])
+                    )
+
+        if semantic_query_dict:
+            semantic_query_results_dict = semantic_search_collection(
+                collection=collection,
+                query_dict=semantic_query_dict,
+                n_results=min(n_results * 10, 500),
+            )
+            if semantic_query_results_dict:
+                for key in combined_query_results:
+                    combined_query_results[key].extend(
+                        semantic_query_results_dict.get(key, [])
+                    )
+
+    combined_query_results = pd.DataFrame(combined_query_results)
 
     final_results = {}
     for query_text in query_texts:
         result = get_final_results(
-            query_text, combined_query_results, n_results=n_results
+            normalize_query_text(query_text),
+            combined_query_results,
+            n_results=n_results,
         )
         final_results[str(query_text)] = {k: list(result[k]) for k in result}
 

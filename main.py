@@ -203,6 +203,10 @@ def main():
         "antifungal",
         ["bull", "monk"],
         "find me a photo of a rabbit in the snow",
+        "2012-XX-XXTXX:XX:XX to 2014-XX-XXTXX:XX:XX",  # Any pictures from 2012 to 2014
+        "2008-XX-XXTXX:XX:XX to 2012-XX-XXTXX:XX:XX",  # Any pictures from 2008 to 2012
+        "summer",  # Example of a date range query (e.g. for "summer" or "christmas")
+        "christmas",  # Example of a date range query (e.g. for "summer" or "christmas")
     ]
     ranked_queries = query_all_collections(
         chroma_client=chroma_client,
