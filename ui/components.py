@@ -57,7 +57,7 @@ def dialog_options(**kwargs) -> dict:
 
 
 def render_search_settings_body() -> None:
-    st.caption("Search filters live here. Date and media filters can be added later.")
+    st.caption("Search settings are applied after retrieval. Filtered searches fetch a larger candidate pool first.")
     st.session_state["top_n"] = int(
         st.number_input(
             "Number of results",
@@ -68,6 +68,38 @@ def render_search_settings_body() -> None:
             help="Number of ranked results to fetch from Chroma.",
         )
     )
+    st.selectbox(
+        "Media type",
+        ["All", "Images", "Videos"],
+        key="filter_media_type",
+    )
+    st.multiselect(
+        "Extensions",
+        sorted(IMAGE_EXTENSIONS | VIDEO_EXTENSIONS),
+        key="filter_extensions",
+        help="Leave empty to allow all extensions.",
+    )
+    st.number_input(
+        "Minimum score",
+        min_value=0.0,
+        max_value=1.0,
+        step=0.001,
+        format="%.4f",
+        key="filter_min_score",
+    )
+    date_from_col, date_to_col = st.columns(2)
+    with date_from_col:
+        st.text_input(
+            "Date from",
+            key="filter_date_from",
+            placeholder="YYYY-MM-DD",
+        )
+    with date_to_col:
+        st.text_input(
+            "Date to",
+            key="filter_date_to",
+            placeholder="YYYY-MM-DD",
+        )
 
 
 def render_detail_body(entry_id: str, entry: dict, rank: int, score: float | None):

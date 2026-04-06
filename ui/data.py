@@ -13,13 +13,29 @@ def get_required_env(name: str) -> str:
 
 
 @st.cache_resource(show_spinner=False)
-def get_mongo_collection():
+def get_mongo_database():
     import pymongo
 
     client = pymongo.MongoClient(get_required_env("MONGO_URL"))
-    return client[get_required_env("MONGO_DB_NAME")][
-        get_required_env("MONGO_COLLECTION_NAME")
-    ]
+    return client[get_required_env("MONGO_DB_NAME")]
+
+
+def get_mongo_collection():
+    return get_mongo_database()[get_required_env("MONGO_COLLECTION_NAME")]
+
+
+@st.cache_resource(show_spinner=False)
+def get_search_history_collection():
+    from ui.config import SEARCH_HISTORY_COLLECTION
+
+    collection_name = os.getenv(
+        "MEDIA_SEARCH_HISTORY_COLLECTION",
+        SEARCH_HISTORY_COLLECTION,
+    )
+    collection = get_mongo_database()[collection_name]
+    collection.create_index([("history_user", 1), ("created_at", -1)])
+    collection.create_index([("history_user", 1), ("search_key", 1)], unique=True)
+    return collection
 
 
 @st.cache_resource(show_spinner=False)
