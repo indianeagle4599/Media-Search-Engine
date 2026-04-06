@@ -9,13 +9,13 @@ The main orchestrator. Which:
 """
 
 import os, json, warnings, hashlib
-import pymongo, chromadb
+import pymongo
 from dotenv import load_dotenv
 
 from utils.io import index_folder
 from utils.mongo import check_if_exists, upsert_dict_objects
 from utils.prompt import describe_image
-from utils.chroma import populate_db, query_all_collections
+from utils.chroma import get_chroma_client, populate_db, query_all_collections
 
 from google import genai
 
@@ -147,7 +147,7 @@ def main():
     # Connect to MongoDB
     collection = pymongo.MongoClient(MONGO_URL)[MONGO_DB_NAME][MONGO_COLLECTION_NAME]
     # Connect to ChromaDB
-    chroma_client = chromadb.PersistentClient(path=CHROMA_URL)
+    chroma_client = get_chroma_client(path=CHROMA_URL)
 
     verbose = True
     images_root = "images_root"

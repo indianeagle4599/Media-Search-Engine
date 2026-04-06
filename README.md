@@ -34,6 +34,15 @@ Override defaults (e.g., `images_root`, Gemini model, sample queries) inside `ma
 5. **Populate Chroma** – `populate_db` scatters the structured content into per-field collections without clobbering existing vectors.
 6. **Query** – adjust `query_texts` in `main.py` and inspect the printed top‑k summaries to validate relevance.
 
+## Run the Streamlit Query UI
+After MongoDB and the persistent Chroma store are populated, launch:
+
+```
+streamlit run streamlit_app.py
+```
+
+Enter a free-text query, choose the number of results to return, and the app will render ranked media previews from the stored `metadata.file_path` values.
+
 ## Retrieval Model in One Breath
 - Queries can be strings or token lists; they’re lowercased/de-duped before embedding.
 - Embeddings are cached per model to avoid recomputation during the run.
