@@ -1,11 +1,6 @@
 Next Up
 
-[X] Update post-VLM metadata schema to use new, canonical dates.
-[X] Add Mongo update code to update metadata even if descriptions are not newly generated.
-[X] Create a mongo "test" data retreiver to quickly get random datapoints.
-
-[ ] Create a date-based retrieval function.
-[X] Add keyword-matching or BM-25 searching options and add match-based score to current method.
+[ ] Create simple UI to find and display files
 
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
@@ -13,7 +8,7 @@ Next Up
 Tasks
 
 [ ] File tracker improvements
-    [ ] Simplify metadata schema further - condense and retain fewer metadata fields (do after adding other file support) 
+    [ ] Simplify metadata schema further - condense and retain fewer metadata fields (do after adding other file support)
     [ ] Normalize and convert files and create a structured local file manager
         [ ] Create a simple, temp-file type converter (a volatile proxy), to pass directly unsupported images to the LLM.
         [ ] Allow analysis support for avif and other image file types.
@@ -31,15 +26,14 @@ Tasks
         [ ] Check options for batch predictions
         [ ] Explore lighter models
     [ ] Use pydantic for maintaining standard schema
-    [ ] MongoDB
-        [X] Add Mongo update code to update metadata even if descriptions are not newly generated.
-        [X] Create a mongo "test" data retreiver to quickly get random datapoints.
-        [ ] Add simple search options
     [ ] ChromaDB
         [ ] Explore optimizations like multi-processing, hybrid-search, caching, etc.
-        [ ] Allow simple retrieval options like dates, standard text matching, etc.
+        [X] Allow simple retrieval options like dates, standard text matching, etc.
             [X] Lexical matching
-            [ ] Date-search
+            [X] Date-search
+                [X] Multi-filter ISO/semantic date parser
+                [X] Chronological search with RRF pre-aggregation
+                [X] Shared date utility module for IO/retrieval/Chroma date code
         [ ] Create retrieval evaluation setup
             [ ] Create a random data downloader
     [ ] Add RAG-based search features.
