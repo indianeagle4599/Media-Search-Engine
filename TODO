@@ -3,6 +3,8 @@ Next Up
 [X] Update post-VLM metadata schema to use new, canonical dates.
 [X] Add Mongo update code to update metadata even if descriptions are not newly generated.
 [X] Create a mongo "test" data retreiver to quickly get random datapoints.
+[X] Create a Streamlit search UI with image grid results, HEIC previews, and detail modals.
+[X] Add a ChromaDB viewer page with navigation, collapsible collections, and JSON metadata inspection.
 
 [ ] Create a date-based retrieval function.
 [ ] Add keyword-matching and BM-25 searching options and add match-based score to current method.
@@ -13,7 +15,7 @@ Next Up
 Tasks
 
 [ ] File tracker improvements
-    [ ] Simplify metadata schema further - condense and retain fewer metadata fields (do after adding other file support) 
+    [ ] Simplify metadata schema further - condense and retain fewer metadata fields (do after adding other file support)
     [ ] Normalize and convert files and create a structured local file manager
         [ ] Create a simple, temp-file type converter (a volatile proxy), to pass directly unsupported images to the LLM.
         [ ] Allow analysis support for avif and other image file types.
@@ -41,7 +43,16 @@ Tasks
         [ ] Create retrieval evaluation setup
             [ ] Create a random data downloader
 [ ] UI
-    [ ] Create simple UI to find and display files
+    [X] Create simple UI to find and display files
+    [X] Add grid result browsing with hover labels and detailed preview modals.
+    [X] Add a configure-search modal for Top N retrieval settings.
+    [X] Add HEIC/HEIF preview support.
+    [X] Add a ChromaDB viewer page with collapsible collections and metadata JSON inspection.
+    [ ] Add media type, date range, collection, and score-threshold filters.
+    [ ] Add search history and saved searches.
+    [ ] Add a query debugging panel showing per-collection scores and matched fields.
+    [ ] Add relevance feedback controls for search results to support ranking evaluation.
+    [ ] Add actions to open/copy original file paths from the detail modal.
     [ ] Add a Chat option as relevant.
     [ ] Add RAG-based search features.
     [ ] Add Agentic search utils for specialised searching.

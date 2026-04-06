@@ -23,40 +23,63 @@ EMPTY_STATE = (
 
 def initialize_state() -> None:
     for key, value in {
-        "top_n": DEFAULT_TOP_N,
+        "page": "Search",
         "search_query": "",
+        "top_n": DEFAULT_TOP_N,
         "last_result_ids": [],
         "last_result_entries": {},
         "last_result_scores": [],
+        "last_result_ranks": {},
+        "last_result_score_by_id": {},
     }.items():
         st.session_state.setdefault(key, value)
 
 
+def render_navbar() -> str:
+    _, nav_col, _ = st.columns([1.35, 2.3, 1.35])
+    with nav_col:
+        page = st.radio(
+            "Navigation",
+            ["Search", "ChromaDB"],
+            horizontal=True,
+            key="page",
+            label_visibility="collapsed",
+            on_change=clear_selected_entry_id,
+        )
+    return page
+
+
 def render_search_controls() -> bool:
-    search_col, settings_col = st.columns([6, 1.2])
+    _, search_col, _ = st.columns([1.7, 3.6, 1.7])
     with search_col:
-        with st.form("media_search_form", clear_on_submit=False):
-            query_col, submit_col = st.columns([5, 1.1])
-            with query_col:
-                st.text_input(
-                    "Search",
-                    key="search_query",
-                    placeholder=(
-                        "Try “beach sunrise”, “group photo”, or “receipt text”"
-                    ),
-                )
-            with submit_col:
-                st.write("")
-                submitted = st.form_submit_button(
-                    "Search",
-                    type="primary",
-                    use_container_width=True,
-                )
-    with settings_col:
-        st.write("")
-        if st.button("Settings", use_container_width=True):
-            search_settings_dialog()
-        st.caption(f"{int(st.session_state['top_n'])} results")
+        st.text_input(
+            "Search",
+            key="search_query",
+            placeholder="Try “beach sunrise”, “group photo”, or “receipt text”",
+            label_visibility="collapsed",
+        )
+
+        settings_col, search_button_col = st.columns([1, 1], gap="small")
+        with settings_col:
+            if st.button(
+                "Configure",
+                key="search_configure",
+                use_container_width=True,
+            ):
+                search_settings_dialog()
+        with search_button_col:
+            submitted = st.button(
+                "Search",
+                key="search_submit",
+                type="primary",
+                use_container_width=True,
+            )
+
+        st.markdown(
+            f'<div class="search-hint muted">Retrieving top '
+            f'{int(st.session_state["top_n"])} result(s)</div>',
+            unsafe_allow_html=True,
+        )
 
     return submitted
 
@@ -76,6 +99,13 @@ def main() -> None:
     st.set_page_config(page_title="Media Search", layout="wide")
     initialize_state()
     render_app_shell()
+    page = render_navbar()
+
+    if page == "ChromaDB":
+        from ui.chroma_viewer import render_chroma_viewer
+
+        render_chroma_viewer()
+        return
 
     submitted = render_search_controls()
 

@@ -8,6 +8,7 @@ import streamlit as st
 
 from ui.config import (
     APP_CSS,
+    DEFAULT_TOP_N,
     GRID_COLUMNS,
     IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
@@ -57,13 +58,15 @@ def dialog_options(**kwargs) -> dict:
 
 def render_search_settings_body() -> None:
     st.caption("Search filters live here. Date and media filters can be added later.")
-    st.number_input(
-        "Number of results",
-        min_value=1,
-        max_value=50,
-        step=1,
-        key="top_n",
-        help="Number of ranked results to fetch from Chroma.",
+    st.session_state["top_n"] = int(
+        st.number_input(
+            "Number of results",
+            min_value=1,
+            max_value=50,
+            value=int(st.session_state.get("top_n", DEFAULT_TOP_N)),
+            step=1,
+            help="Number of ranked results to fetch from Chroma.",
+        )
     )
 
 
@@ -108,7 +111,7 @@ def render_detail_body(entry_id: str, entry: dict, rank: int, score: float | Non
 
 if hasattr(st, "dialog"):
 
-    @st.dialog("Search Settings", **dialog_options(width="small"))
+    @st.dialog("Configure Search", **dialog_options(width="small"))
     def search_settings_dialog():
         render_search_settings_body()
 
@@ -140,7 +143,8 @@ def render_result_preview(file_path: str, file_name: str, ext: str) -> None:
             preview = get_thumbnail_data_uri(str(path), path.stat().st_mtime_ns)
             st.markdown(
                 f'<div class="result-card"><img src="{preview}" '
-                f'alt="{title}" title="{title}"></div>',
+                f'alt="{title}" title="{title}">'
+                f'<div class="result-card__title">{title}</div></div>',
                 unsafe_allow_html=True,
             )
             return
@@ -180,7 +184,7 @@ def render_results_grid(
     score_by_id = st.session_state["last_result_score_by_id"]
 
     for row_start in range(0, len(ids), columns):
-        row_columns = st.columns(columns)
+        row_columns = st.columns(columns, gap="medium")
         for offset, column in enumerate(row_columns):
             index = row_start + offset
             if index >= len(ids):

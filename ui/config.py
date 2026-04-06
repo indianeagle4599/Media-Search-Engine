@@ -2,6 +2,7 @@
 
 DEFAULT_TOP_N = 10
 GRID_COLUMNS = 4
+CHROMA_VIEWER_DEFAULT_LIMIT = 100
 
 IMAGE_EXTENSIONS = {
     "jpg",
@@ -20,15 +21,15 @@ HEIF_EXTENSIONS = {"heic", "heif"}
 APP_CSS = """
 <style>
 .block-container {
-  max-width: 1320px;
-  padding-top: 2rem;
-  padding-bottom: 3rem;
+  max-width: 1240px;
+  padding-top: 1.35rem;
+  padding-bottom: 3.5rem;
 }
 .hero {
-  margin: 0.25rem 0 1.2rem;
-  padding: 1.15rem 1.25rem;
+  margin: 0.15rem auto 1rem;
+  padding: 1rem 1.15rem;
   border: 1px solid rgba(128, 128, 128, 0.18);
-  border-radius: 1rem;
+  border-radius: 1.15rem;
   background:
     radial-gradient(circle at top left, rgba(99, 102, 241, 0.18), transparent 32rem),
     linear-gradient(135deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
@@ -41,11 +42,54 @@ APP_CSS = """
 .muted {
   color: rgba(128, 128, 128, 0.98);
 }
+.search-hint {
+  margin: 0.25rem 0 1.2rem;
+  text-align: center;
+  font-size: 0.86rem;
+}
+.result-card {
+  position: relative;
+  overflow: hidden;
+  padding: 0.35rem;
+  border: 1px solid rgba(128, 128, 128, 0.14);
+  border-radius: 1.2rem;
+  background: rgba(128, 128, 128, 0.055);
+  transition:
+    border-color 140ms ease,
+    transform 140ms ease,
+    background 140ms ease;
+}
+.result-card:hover {
+  border-color: rgba(99, 102, 241, 0.42);
+  background: rgba(99, 102, 241, 0.08);
+  transform: translateY(-1px);
+}
 .result-card img {
   width: 100%;
   aspect-ratio: 1 / 1;
   object-fit: cover;
-  border-radius: 1rem;
+  border-radius: 0.9rem;
+  display: block;
+}
+.result-card__title {
+  position: absolute;
+  left: 0.7rem;
+  right: 0.7rem;
+  bottom: 0.7rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 0.75rem;
+  background: rgba(0, 0, 0, 0.64);
+  color: #ffffff;
+  font-size: 0.82rem;
+  font-weight: 700;
+  opacity: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity 140ms ease;
+  white-space: nowrap;
+}
+.result-card:hover .result-card__title {
+  opacity: 1;
 }
 .result-placeholder {
   display: flex;
