@@ -5,6 +5,7 @@ pillow
 pillow-heif
 exifread
 defusedxml
+timezonefinder
 chromadb
 pymongo
 ollama

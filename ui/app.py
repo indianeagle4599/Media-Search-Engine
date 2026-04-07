@@ -54,11 +54,11 @@ def initialize_state() -> None:
 
 
 def render_navbar() -> str:
-    _, nav_col, _ = st.columns([1.35, 2.3, 1.35])
+    _, nav_col, _ = st.columns([1, 3.4, 1])
     with nav_col:
         page = st.radio(
             "Navigation",
-            ["Search", "ChromaDB"],
+            ["Search", "Upload", "Gallery", "ChromaDB"],
             horizontal=True,
             key="page",
             label_visibility="collapsed",
@@ -173,6 +173,18 @@ def main() -> None:
         from ui.chroma_viewer import render_chroma_viewer
 
         render_chroma_viewer()
+        return
+
+    if page == "Upload":
+        from ui.upload import render_upload_page
+
+        render_upload_page()
+        return
+
+    if page == "Gallery":
+        from ui.gallery import render_gallery_page
+
+        render_gallery_page()
         return
 
     history_item = render_history_controls()

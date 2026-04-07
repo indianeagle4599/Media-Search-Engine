@@ -6,6 +6,7 @@ Next Up
 [X] Create a Streamlit search UI with image grid results, HEIC previews, and detail modals.
 [X] Add a ChromaDB viewer page with navigation, collapsible collections, and JSON metadata inspection.
 [X] Add faceted UI filters and Mongo-backed search history with saved result loading.
+[X] Add manual upload UI and decouple ingestion orchestration into reusable utilities.
 
 [ ] Create a date-based retrieval function.
 [ ] Add keyword-matching and BM-25 searching options and add match-based score to current method.
@@ -29,6 +30,7 @@ Tasks
         [ ] Support metadata extraction for other file types like TIF, SVG, etc.
     [ ] Video metadata extraction and indexing support
 [ ] Media indexer improvements
+    [X] Move ingestion orchestration into reusable ingest utilities.
     [ ] VLM
         [ ] Create a multi-API setup to leverage free tier extractions
         [ ] Check options for batch predictions
@@ -44,6 +46,8 @@ Tasks
         [ ] Create retrieval evaluation setup
             [ ] Create a random data downloader
 [ ] UI
+    [X] Add manual upload page with local storage and Mongo/Chroma indexing.
+    [X] Add separate uploaded image gallery page with sorting and random retrieval.
     [X] Add media type, date range, extension, and score-threshold filters.
     [X] Add Mongo-backed search history and saved searches.
     [X] Add saved result loading and history flushing.
@@ -57,4 +61,5 @@ Tasks
 [ ] Good SDE practices
     [ ] Leverage branches for feature development.
     [ ] Setup Pytest and design test cases for various functions.
+    [X] Add focused upload and ingestion unit tests.
     [ ] Add docstrings

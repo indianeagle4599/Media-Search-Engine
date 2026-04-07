@@ -9,7 +9,8 @@ By splitting narrative, lexical, OCR, and absolute fields into their own indexes
 - **Captioner (`utils/prompt.py`)** — Assemble `/prompts/describe_image` into Gemini requests for every compatible asset (JPEG/PNG/WebP/HEIC + major video codecs) and enforce the `content/context` schema.
 - **Persistence (`utils/mongo.py`)** — Store each `<file_hash>_<model_hash>` entry with metadata + description, dedupe by probing Mongo first, and upsert only what’s missing.
 - **Vector Store (`utils/chroma.py`)** — Split descriptions into narrative, lexical, OCR, and absolute fields; feed each into its own Chroma collection with field-appropriate embeddings (MiniLM vs. Ollama `mxbai-embed-large`), keeping prior vectors unless `overwrite=True`.
-- **Retrieval (`query_all_collections`)** — Clean queries, reuse cached embeddings, query every populated collection, and fuse results with Reciprocal Rank Fusion (weighted toward narrative fields). `main.py` prints top‑k summaries per query for quick smoke tests.
+- **Retrieval (`query_all_collections`)** — Clean queries, reuse cached embeddings, query every populated collection, and fuse results with Reciprocal Rank Fusion (weighted toward narrative fields).
+- **Ingestion (`utils/ingest.py`)** — Reusable orchestration for folder and uploaded-file ingestion, covering metadata sync, missing descriptions, and Chroma population.
 - **Evaluation hook (`eval_retrieval.py`)** — Loads scenarios from `json_outs/eval_retrieval.json`; fill `get_retrieval`/`evaluate_chroma` to track latency vs. accuracy once you have gold sets.
 
 ## Configuration
@@ -24,15 +25,20 @@ CHROMA_URL=<path to persistent chroma store>
 REPO_ROOT=<absolute repo path>  # prompt assembly
 ```
 
-Override defaults (e.g., `images_root`, Gemini model, sample queries) inside `main.py` before running.
+Optional overrides:
+
+```
+MEDIA_INDEX_ROOT=images_root
+MEDIA_API_NAME=gemini
+MEDIA_MODEL_NAME=gemini-2.5-flash-lite
+MEDIA_UPLOAD_ROOT=images_root/uploads
+MEDIA_UPLOAD_COLLECTION=media_uploads
+```
 
 ## Run the Pipeline
 1. **Install deps** – `pip install -r requirements.txt` (Ollama must expose `mxbai-embed-large` locally if you use the default Chroma config).
-2. **Index media** – `index_folder("images_root")` fingerprints every asset and resolves timestamps.
-3. **Sync Mongo** – `fetch_existing` + `update_metadata` pull prior entries, ensure metadata matches the latest schema, and tell you what still needs descriptions.
-4. **Describe gaps** – `populate_missing` streams the remaining assets through Gemini and upserts each batch immediately.
-5. **Populate Chroma** – `populate_db` scatters the structured content into per-field collections without clobbering existing vectors.
-6. **Query** – adjust `query_texts` in `main.py` and inspect the printed top‑k summaries to validate relevance.
+2. **Run ingestion** – `python main.py` indexes `MEDIA_INDEX_ROOT`, syncs Mongo, fills missing descriptions, and populates Chroma.
+3. **Query** – use the Streamlit UI or call `query_all_collections` directly from `utils.chroma`.
 
 ## Run the Streamlit Query UI
 After MongoDB and the persistent Chroma store are populated, launch:
@@ -41,11 +47,10 @@ After MongoDB and the persistent Chroma store are populated, launch:
 streamlit run streamlit_app.py
 ```
 
-Enter a free-text query, choose the number of results to return, and the app will render ranked media previews from the stored `metadata.file_path` values.
+Enter a free-text query, choose the number of results to return, and the app will render ranked media previews from the stored `metadata.file_path` values. The Upload page saves new files under `MEDIA_UPLOAD_ROOT/<YYYY-MM-DD>/` and can manually index the current upload batch into MongoDB and ChromaDB. The Gallery page shows deduplicated uploaded images with sorting and random sampling.
 
 ## Retrieval Model in One Breath
 - Queries can be strings or token lists; they’re lowercased/de-duped before embedding.
 - Embeddings are cached per model to avoid recomputation during the run.
 - Every collection returns its own ranked list; scores are fused with RRF using per-collection weights (narrative > lexical > OCR > metadata).
 - Top hits are mapped back to Mongo entries so you can display the Gemini summaries or any other metadata you’ve stored.
-

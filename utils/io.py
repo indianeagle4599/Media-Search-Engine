@@ -411,59 +411,77 @@ def get_embedded_metadata(image_path: str):
 
 
 # Main indexing function
-def index_folder(file_root: str, verbose: bool = False):
-    files_index = {}
-    dummy_meta = {
-        "file_hash": "",
-        # Essentials
-        "file_path": "",
-        "file_name": "",  # Name shall be normalized later
-        "media_type": "",  # Media type is "image" or "video"
-        "ext": "",  # Media type extension
-        "is_compat": False,
-        # Dates
+def build_file_metadata(
+    file_path: str,
+    metadata_override: dict | None = None,
+) -> tuple[str, dict]:
+    file_path = os.path.abspath(os.path.normpath(file_path)).replace("\\", "/")
+    file = os.path.basename(file_path)
+    file_ext = os.path.splitext(file)[-1][1:].lower()
+    media_type = ""
+    is_compat = False
+    if file_ext in IM_TYPES:
+        media_type = "image"
+    elif file_ext in VI_TYPES:
+        media_type = "video"
+    if file_ext in COMPAT_TYPES:
+        is_compat = True
+
+    file_hash = get_hash(file_path)
+    metadata = {
+        "file_hash": file_hash,
+        "file_path": file_path,
+        "file_name": file,
+        "media_type": media_type,
+        "ext": file_ext,
+        "is_compat": is_compat,
         "dates": {},
-        # Detailed metadata
         "embedded_metadata": {},
     }
-    for path, dirs, files in os.walk(file_root):
-        for file in files:
-            file_ext = os.path.splitext(file)[-1][1:].lower()
-            media_type = ""
-            is_compat = False
-            if file_ext in IM_TYPES:
-                media_type = "image"
-            elif file_ext in VI_TYPES:
-                media_type = "video"
-            if file_ext in COMPAT_TYPES:
-                is_compat = True
 
-            file_path = os.path.abspath(
-                os.path.normpath(os.path.join(path, file))
-            ).replace("\\", "/")
-            file_hash = get_hash(file_path)
-            files_index[file_hash] = dummy_meta.copy()
+    embedded_metadata = get_embedded_metadata(file_path)
+    dates = get_os_dates(file_path)
+    dates.update(embedded_metadata.pop("DateItems", {}))
+    metadata["dates"] = resolve_dates(dates)
+    metadata["embedded_metadata"] = embedded_metadata
 
-            files_index[file_hash].update(
-                {
-                    "file_hash": file_hash,
-                    "file_path": file_path,
-                    "file_name": file,
-                    "media_type": media_type,
-                    "ext": file_ext,
-                    "is_compat": is_compat,
-                }
-            )
-            metadata = get_embedded_metadata(file_path)
-            dates = get_os_dates(file_path)
-            dates.update(metadata.pop("DateItems", {}))
+    if metadata_override:
+        metadata.update(metadata_override)
+        metadata["file_hash"] = file_hash
+        metadata["file_path"] = file_path
+        metadata["ext"] = file_ext
 
-            files_index[file_hash]["dates"] = resolve_dates(dates)
-            files_index[file_hash]["embedded_metadata"] = metadata
+    return file_hash, metadata
+
+
+def index_paths(
+    file_paths: list[str],
+    metadata_overrides: dict[str, dict] | None = None,
+    verbose: bool = False,
+):
+    files_index = {}
+    metadata_overrides = metadata_overrides or {}
+    for file_path in file_paths:
+        normalized_path = os.path.abspath(os.path.normpath(file_path)).replace(
+            "\\", "/"
+        )
+        override = metadata_overrides.get(normalized_path) or metadata_overrides.get(
+            file_path
+        )
+        file_hash, metadata = build_file_metadata(normalized_path, override)
+        files_index[file_hash] = metadata
 
     if verbose:
         print(json.dumps(files_index, indent=2))
     return files_index
+
+
+def index_folder(file_root: str, verbose: bool = False):
+    file_paths = []
+    for path, dirs, files in os.walk(file_root):
+        for file in files:
+            file_paths.append(os.path.join(path, file))
+    return index_paths(file_paths, verbose=verbose)
 
 
 if __name__ == "__main__":

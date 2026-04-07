@@ -39,6 +39,18 @@ def get_search_history_collection():
 
 
 @st.cache_resource(show_spinner=False)
+def get_upload_collection():
+    from ui.config import UPLOAD_COLLECTION
+
+    collection_name = os.getenv("MEDIA_UPLOAD_COLLECTION", UPLOAD_COLLECTION)
+    collection = get_mongo_database()[collection_name]
+    collection.create_index([("batch_id", 1), ("created_at", -1)])
+    collection.create_index([("file_hash", 1), ("status", 1)])
+    collection.create_index([("media_entry_id", 1)])
+    return collection
+
+
+@st.cache_resource(show_spinner=False)
 def get_chroma_client():
     from utils.chroma import get_chroma_client as create_chroma_client
 
