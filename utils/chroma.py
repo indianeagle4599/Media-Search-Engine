@@ -4,7 +4,7 @@ chroma.py
 Contains utilities to create, update and use a chromadb for storing and querying from the descriptions of all images.
 """
 
-import chromadb, json
+import chromadb, json, os
 from datetime import datetime
 from chromadb.utils.batch_utils import create_batches
 from chromadb.utils.embedding_functions.ollama_embedding_function import (
@@ -98,6 +98,30 @@ collection_ef_map = {
     "list": minilm_ef,
     "word": minilm_ef,
 }
+
+
+def get_chroma_client(
+    path: str | None = None,
+    host: str | None = None,
+    port: int | str | None = None,
+    ssl: bool | None = None,
+):
+    host = host or os.getenv("CHROMA_HOST") or os.getenv("CHROMA_SERVER_HOST")
+    if host:
+        port = int(port or os.getenv("CHROMA_PORT") or 8000)
+        if ssl is None:
+            ssl = os.getenv("CHROMA_SSL", "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+        return chromadb.HttpClient(host=host, port=port, ssl=ssl)
+
+    path = path or os.getenv("CHROMA_URL")
+    if not path:
+        raise RuntimeError("Set CHROMA_URL or CHROMA_HOST/CHROMA_SERVER_HOST.")
+
+    return chromadb.PersistentClient(path=path)
 
 
 def prep_dict_for_upsert(field_dict: dict):
@@ -331,7 +355,7 @@ def populate_db(
 
                 if field_type == "sentence" and field_name == "context_narrative":
                     # Upsert absolute fields to a one collection to allow simpler searches
-                    absolute_fields = class_wise_db_dict.pop("absolute", {})
+                    absolute_fields = class_wise_db_dict.get("absolute", {})
 
                     metadatas_list = [absolute_fields.get(id) for id in ids]
                     batches = create_batches(

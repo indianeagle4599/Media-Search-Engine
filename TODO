@@ -3,6 +3,10 @@ Next Up
 [X] Update post-VLM metadata schema to use new, canonical dates.
 [X] Add Mongo update code to update metadata even if descriptions are not newly generated.
 [X] Create a mongo "test" data retreiver to quickly get random datapoints.
+[X] Create a Streamlit search UI with image grid results, HEIC previews, and detail modals.
+[X] Add a ChromaDB viewer page with navigation, collapsible collections, and JSON metadata inspection.
+[X] Add faceted UI filters and Mongo-backed search history with saved result loading.
+[X] Add manual upload UI and decouple ingestion orchestration into reusable utilities.
 
 [ ] Create a date-based retrieval function.
 [ ] Add keyword-matching and BM-25 searching options and add match-based score to current method.
@@ -13,7 +17,7 @@ Next Up
 Tasks
 
 [ ] File tracker improvements
-    [ ] Simplify metadata schema further - condense and retain fewer metadata fields (do after adding other file support) 
+    [ ] Simplify metadata schema further - condense and retain fewer metadata fields (do after adding other file support)
     [ ] Normalize and convert files and create a structured local file manager
         [ ] Create a simple, temp-file type converter (a volatile proxy), to pass directly unsupported images to the LLM.
         [ ] Allow analysis support for avif and other image file types.
@@ -26,6 +30,7 @@ Tasks
         [ ] Support metadata extraction for other file types like TIF, SVG, etc.
     [ ] Video metadata extraction and indexing support
 [ ] Media indexer improvements
+    [X] Move ingestion orchestration into reusable ingest utilities.
     [ ] VLM
         [ ] Create a multi-API setup to leverage free tier extractions
         [ ] Check options for batch predictions
@@ -41,11 +46,20 @@ Tasks
         [ ] Create retrieval evaluation setup
             [ ] Create a random data downloader
 [ ] UI
-    [ ] Create simple UI to find and display files
+    [X] Add manual upload page with local storage and Mongo/Chroma indexing.
+    [X] Add separate uploaded image gallery page with sorting and random retrieval.
+    [X] Add media type, date range, extension, and score-threshold filters.
+    [X] Add Mongo-backed search history and saved searches.
+    [X] Add saved result loading and history flushing.
+    [ ] Add collection filters once query results expose per-result collection metadata.
+    [ ] Add a query debugging panel showing per-collection scores and matched fields.
+    [ ] Add relevance feedback controls for search results to support ranking evaluation.
+    [ ] Add actions to open/copy original file paths from the detail modal.
     [ ] Add a Chat option as relevant.
     [ ] Add RAG-based search features.
     [ ] Add Agentic search utils for specialised searching.
 [ ] Good SDE practices
     [ ] Leverage branches for feature development.
     [ ] Setup Pytest and design test cases for various functions.
+    [X] Add focused upload and ingestion unit tests.
     [ ] Add docstrings
