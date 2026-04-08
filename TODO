@@ -1,12 +1,5 @@
 Next Up
 
-[X] Update post-VLM metadata schema to use new, canonical dates.
-[X] Add Mongo update code to update metadata even if descriptions are not newly generated.
-[X] Create a mongo "test" data retreiver to quickly get random datapoints.
-[X] Create a Streamlit search UI with image grid results, HEIC previews, and detail modals.
-[X] Add a ChromaDB viewer page with navigation, collapsible collections, and JSON metadata inspection.
-[X] Add faceted UI filters and Mongo-backed search history with saved result loading.
-[X] Add manual upload UI and decouple ingestion orchestration into reusable utilities.
 
 [ ] Create a date-based retrieval function.
 [ ] Add keyword-matching and BM-25 searching options and add match-based score to current method.
@@ -46,11 +39,7 @@ Tasks
         [ ] Create retrieval evaluation setup
             [ ] Create a random data downloader
 [ ] UI
-    [X] Add manual upload page with local storage and Mongo/Chroma indexing.
-    [X] Add separate uploaded image gallery page with sorting and random retrieval.
-    [X] Add media type, date range, extension, and score-threshold filters.
-    [X] Add Mongo-backed search history and saved searches.
-    [X] Add saved result loading and history flushing.
+    [X] Polish detail modal, fullscreen media view, and gallery card UX.
     [ ] Add collection filters once query results expose per-result collection metadata.
     [ ] Add a query debugging panel showing per-collection scores and matched fields.
     [ ] Add relevance feedback controls for search results to support ranking evaluation.

@@ -378,6 +378,42 @@ def populate_db(
                         collection.upsert(ids=batch_ids, documents=batch_documents)
 
 
+def delete_entry_ids(chroma_client, entry_ids: list[str]):
+    if not chroma_client or not entry_ids:
+        return
+
+    try:
+        collections = chroma_client.list_collections()
+    except Exception:
+        return
+
+    prefixes = tuple(f"{entry_id}_" for entry_id in entry_ids)
+    direct_ids = set(entry_ids)
+
+    for collection_item in collections:
+        collection_name = (
+            collection_item.name
+            if hasattr(collection_item, "name")
+            else collection_item
+        )
+        if not collection_name:
+            continue
+
+        try:
+            collection = chroma_client.get_collection(collection_name)
+            existing_ids = collection.get(include=[]).get("ids", [])
+        except Exception:
+            continue
+
+        ids_to_delete = [
+            item_id
+            for item_id in existing_ids
+            if item_id in direct_ids or item_id.startswith(prefixes)
+        ]
+        if ids_to_delete:
+            collection.delete(ids=ids_to_delete)
+
+
 def semantic_search_collection(
     collection: chromadb.Collection, query_dict: dict, n_results: int = 50
 ):
