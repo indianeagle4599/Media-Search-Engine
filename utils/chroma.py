@@ -4,7 +4,7 @@ chroma.py
 Contains utilities to create, update and use a chromadb for storing and querying from the descriptions of all images.
 """
 
-import chromadb, json, os
+import chromadb, json, os, re
 from datetime import datetime
 from chromadb.utils.batch_utils import create_batches
 from chromadb.utils.embedding_functions.ollama_embedding_function import (
@@ -15,6 +15,38 @@ from chromadb.utils.embedding_functions import (
 )
 
 import pandas as pd
+
+from utils.date import (
+    build_date_where_clause,
+    count_mask_specificity,
+    date_dict_to_ts,
+    extract_date_filter_from_query,
+)
+
+STOPWORDS = set(
+    [
+        "the",
+        "is",
+        "in",
+        "and",
+        "to",
+        "of",
+        "a",
+        "that",
+        "it",
+        "with",
+        "as",
+        "for",
+        "was",
+        "on",
+        "by",
+        "this",
+        "are",
+        "be",
+        "or",
+        "from",
+    ]
+)
 
 field_type_map = {
     # Sentence-like
@@ -58,11 +90,20 @@ collection_dict = {
     "other_data": ["metadata_relevance"],
 }
 field_weight_dict = {
+    # semantic search weights
     "content_narrative": 1.0,
     "context_narrative": 1.0,
     "lexical_keywords": 0.7,
     "ocr_content": 0.4,
     "other_data": 0.1,
+    # lexical search weights
+    "content_narrative_lexical": 0.8,
+    "context_narrative_lexical": 0.8,
+    "lexical_keywords_lexical": 1.0,
+    "ocr_content_lexical": 0.9,
+    "other_data_lexical": 0.5,
+    # chronological search weights
+    "context_narrative_chrono": 1.0,
 }
 
 collection_type_map = {
@@ -98,6 +139,28 @@ collection_ef_map = {
     "list": minilm_ef,
     "word": minilm_ef,
 }
+
+
+def normalize_query_text(query_text: str):
+    if isinstance(query_text, list):
+        return [normalize_query_text(q) for q in query_text]
+    elif isinstance(query_text, str):
+        return query_text.strip().lower()
+
+
+def tokenize_document(document: str):
+    text = document.lower().replace("\n", " ")
+    text = re.sub(r"[^a-z0-9\s]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    tokens = [t for t in text.split() if len(t) > 1 and t not in STOPWORDS]
+    token_string = " ".join(tokens)
+    token_count = len(tokens)
+
+    return {
+        "tokens": tokens,
+        "token_string": token_string,
+        "token_count": token_count,
+    }
 
 
 def get_chroma_client(
@@ -173,25 +236,6 @@ def combine_extracted_fields(extracted_fields: dict, combination_dict: dict):
     return combined_fields
 
 
-def date_to_ts(date_str: str):
-    try:
-        ts = float(datetime.fromisoformat(date_str).timestamp())
-        return ts
-    except Exception as e:
-        print(f"Error converting date string '{date_str}' to timestamp:", e)
-        return None
-
-
-def date_dict_to_ts(date_dict: dict):
-    ts_dict = {}
-    for key, date_str in date_dict.items():
-        key_ts = key.replace("date", "ts")
-        ts = date_to_ts(date_str)
-        if ts:
-            ts_dict[key_ts] = ts
-    return ts_dict
-
-
 def extract_metadata_fields(metadata_object: dict):
     date_object = metadata_object.get("dates") or {}
     clean_date_object = {
@@ -242,7 +286,7 @@ def extract_description_fields(description_object: dict):
         "intent": context_object.get("intent"),  # May need to handle "/"
         "composition": context_object.get("composition"),
         "estimated_date": context_object.get("estimated_date"),
-        "estimated_ts": date_to_ts(context_object.get("estimated_date")),
+        **date_dict_to_ts({"estimated_date": context_object.get("estimated_date")}),
     }
 
     combined_fields = combine_extracted_fields(
@@ -315,6 +359,23 @@ def merge_dicts(dict1: dict, dict2: dict):
     return dict1
 
 
+def upsert_batch_to_collection(collection, batches):
+    for batch_ids, _, batch_metadatas, batch_documents in batches:
+        if batch_metadatas is None:
+            batch_metadatas = [None] * len(batch_ids)
+        for i in range(len(batch_ids)):
+            tokens_dict = tokenize_document(batch_documents[i])
+            if batch_metadatas and isinstance(batch_metadatas[i], dict):
+                batch_metadatas[i].update(tokens_dict)
+            else:
+                batch_metadatas[i] = tokens_dict
+        collection.upsert(
+            ids=batch_ids,
+            metadatas=batch_metadatas,
+            documents=batch_documents,
+        )
+
+
 def populate_db(
     entries: dict,
     chroma_client: chromadb.PersistentClient,
@@ -364,18 +425,192 @@ def populate_db(
                         metadatas=metadatas_list,
                         documents=documents,
                     )
-                    for batch_ids, _, batch_metadatas, batch_documents in batches:
-                        collection.upsert(
-                            ids=batch_ids,
-                            metadatas=batch_metadatas,
-                            documents=batch_documents,
-                        )
                 else:
                     batches = create_batches(
                         chroma_client, ids=ids, documents=documents
                     )
-                    for batch_ids, _, _, batch_documents in batches:
-                        collection.upsert(ids=batch_ids, documents=batch_documents)
+                upsert_batch_to_collection(collection, batches)
+
+
+def chronological_search_collection(
+    collection: chromadb.Collection,
+    query_texts: list[str],
+    date_field: str = "master_date",
+    n_results: int = 50,
+):
+    query_results_dict = {
+        "ids": [],
+        "documents": [],
+        "distances": [],
+        "rank": [],
+        "query_text": [],
+        "collection": [],
+    }
+
+    ts_field = date_field.replace("_date", "_ts")
+
+    for query_text in query_texts:
+        date_info = extract_date_filter_from_query(query_text)
+        date_filters = date_info.get("date_filters", [])
+
+        if not date_filters:
+            continue
+
+        for filter_i, date_filter in enumerate(date_filters):
+            start_mask = date_filter.get("start_mask")
+            end_mask = date_filter.get("end_mask")
+            if not start_mask or not end_mask:
+                continue
+
+            where_clause = build_date_where_clause(date_field, date_filter)
+            if not where_clause:
+                continue
+
+            query_result = collection.get(
+                where=where_clause,
+                include=["documents", "metadatas"],
+            )
+
+            ids = query_result.get("ids", [])
+            documents = query_result.get("documents", [])
+            metadatas = query_result.get("metadatas", [])
+
+            specificity_score = count_mask_specificity(start_mask, end_mask)
+
+            scored = []
+            for id_, doc_, meta_ in zip(ids, documents, metadatas):
+                meta_ = meta_ or {}
+                reliability_bonus = 1 if meta_.get("date_reliability") == "high" else 0
+                ts_value = meta_.get(ts_field)
+                recency_tiebreak = (
+                    ts_value if isinstance(ts_value, (int, float)) else float("-inf")
+                )
+                score = specificity_score + reliability_bonus
+                scored.append((id_, doc_, score, recency_tiebreak))
+
+            scored.sort(key=lambda x: (x[2], x[3]), reverse=True)
+            scored = scored[:n_results]
+
+            for rank, (id_, doc_, score_, _) in enumerate(scored, start=1):
+                query_results_dict["ids"].append(id_)
+                query_results_dict["documents"].append(doc_)
+                query_results_dict["distances"].append(-float(score_))
+                query_results_dict["rank"].append(rank)
+                query_results_dict["query_text"].append(query_text)
+                query_results_dict["collection"].append(
+                    f"{collection.name}_chrono_{filter_i}"
+                )
+
+    return query_results_dict
+
+
+def lexical_search_collection(
+    collection: chromadb.Collection, query_dict: dict, n_results: int = 50
+):
+    query_results_dict = {
+        "ids": [],
+        "documents": [],
+        "distances": [],
+        "rank": [],
+        "query_text": [],
+        "collection": [],
+    }
+
+    for query_text in query_dict.keys():
+        date_info = extract_date_filter_from_query(query_text)
+
+        clean_query_text = date_info["clean_query_text"]
+
+        tokens_dict = tokenize_document(clean_query_text)
+        query_tokens = set(tokens_dict.get("tokens", []))
+        query_token_string = tokens_dict.get("token_string", "")
+
+        token_where = None
+        if query_tokens:
+            if len(query_tokens) == 1:
+                token_where = {"tokens": {"$contains": list(query_tokens)[0]}}
+            else:
+                token_where = {
+                    "$or": [{"tokens": {"$contains": token}} for token in query_tokens]
+                }
+
+        if not token_where:
+            continue
+
+        query_result = collection.get(
+            where=token_where,
+            include=["documents", "metadatas"],
+        )
+
+        ids = query_result.get("ids", [])
+        documents = query_result.get("documents", [])
+        metadatas = query_result.get("metadatas", [])
+
+        scored = []
+        for id_, doc_, meta_ in zip(ids, documents, metadatas):
+            meta_ = meta_ or {}
+
+            doc_tokens = set(meta_.get("tokens", []))
+            doc_token_string = meta_.get("token_string", "")
+            token_overlap = len(query_tokens & doc_tokens)
+            substring_bonus = (
+                2
+                if query_token_string and query_token_string in doc_token_string
+                else 0
+            )
+            score = token_overlap + substring_bonus
+
+            if score > 0:
+                scored.append((id_, doc_, score))
+
+        scored.sort(key=lambda x: x[2], reverse=True)
+        scored = scored[:n_results]
+
+        for rank, (id_, doc_, score_) in enumerate(scored, start=1):
+            query_results_dict["ids"].append(id_)
+            query_results_dict["documents"].append(doc_)
+            query_results_dict["distances"].append(-float(score_))
+            query_results_dict["rank"].append(rank)
+            query_results_dict["query_text"].append(query_text)
+            query_results_dict["collection"].append(f"{collection.name}_lexical")
+
+    return query_results_dict
+
+
+def delete_entry_ids(chroma_client, entry_ids: list[str]):
+    if not chroma_client or not entry_ids:
+        return
+
+    try:
+        collections = chroma_client.list_collections()
+    except Exception:
+        return
+
+    prefixes = tuple(f"{entry_id}_" for entry_id in entry_ids)
+    direct_ids = set(entry_ids)
+
+    for collection_item in collections:
+        collection_name = (
+            collection_item.name
+            if hasattr(collection_item, "name")
+            else collection_item
+        )
+        if not collection_name:
+            continue
+
+        try:
+            collection = chroma_client.get_collection(collection_name)
+            existing_ids = collection.get(include=[]).get("ids", [])
+        except Exception:
+            continue
+
+        ids_to_delete = [
+            item_id
+            for item_id in existing_ids
+            if item_id in direct_ids or item_id.startswith(prefixes)
+        ]
+        if ids_to_delete:
+            collection.delete(ids=ids_to_delete)
 
 
 def semantic_search_collection(
@@ -423,40 +658,77 @@ def get_final_results(
     rrf_smoothing: int = 60,
     n_results: int = 5,
 ):
+    if query_results_df.empty:
+        return pd.DataFrame(columns=["ids", "score", "rank"])
+
+    relevant_df = query_results_df.copy()
+    relevant_df["query_text"] = (
+        relevant_df["query_text"].astype(str).str.strip().str.lower()
+    )
+
     if isinstance(query_text, str):
-        mask = query_results_df["query_text"] == query_text
+        mask = relevant_df["query_text"] == normalize_query_text(query_text)
     elif isinstance(query_text, list):
-        mask = query_results_df["query_text"].isin(query_text)
-    relevant_df = query_results_df[mask].copy()
+        mask = relevant_df["query_text"].isin(
+            [normalize_query_text(q) for q in query_text]
+        )
+    else:
+        return pd.DataFrame(columns=["ids", "score", "rank"])
+
+    relevant_df = relevant_df[mask].copy()
 
     if relevant_df.empty:
         return pd.DataFrame(columns=["ids", "score", "rank"])
 
-    relevant_df["ids"] = relevant_df["ids"].str[
-        :105
-    ]  # sha256 (64 chars) + "_" + sha1 (40 chars) (64+1+40 = 105)
+    relevant_df["ids"] = relevant_df["ids"].astype(str).str[:105]
+    chrono_mask = (
+        relevant_df["collection"]
+        .astype(str)
+        .str.startswith("context_narrative_chrono_")
+    )
+    if chrono_mask.any():
+        chrono_df = relevant_df[chrono_mask].copy()
+        chrono_df["chrono_rrf_score"] = 1 / (chrono_df["rank"] + rrf_smoothing)
+        chrono_vals = (
+            chrono_df.groupby("ids")["chrono_rrf_score"]
+            .sum()
+            .sort_values(ascending=False)
+        )
+        chrono_agg_df = pd.DataFrame(
+            {
+                "ids": chrono_vals.index,
+                "documents": [""] * len(chrono_vals),
+                "distances": -chrono_vals.values,
+                "rank": list(range(1, len(chrono_vals) + 1)),
+                "query_text": [relevant_df["query_text"].iloc[0]] * len(chrono_vals),
+                "collection": ["context_narrative_chrono"] * len(chrono_vals),
+            }
+        )
+        relevant_df = pd.concat(
+            [relevant_df[~chrono_mask], chrono_agg_df], ignore_index=True
+        )
+
     weights = relevant_df["collection"].map(field_weight_dict).fillna(0.2)
     relevant_df["rrf_score"] = weights / (relevant_df["rank"] + rrf_smoothing)
 
     rrf_vals = relevant_df.groupby("ids")["rrf_score"].sum().nlargest(n_results)
-    ranks = pd.DataFrame(
+    return pd.DataFrame(
         {
             "ids": rrf_vals.index,
             "score": rrf_vals.values,
             "rank": list(range(len(rrf_vals))),
         }
     )
-    return ranks
 
 
 def clean_query_texts(query_texts: list):
-    cleaned_query_texts = set()
+    cleaned = set()
     for query_text in query_texts:
         if isinstance(query_text, str):
-            cleaned_query_texts.add(query_text.strip().lower())
+            cleaned.add(normalize_query_text(query_text))
         elif isinstance(query_text, list):
-            cleaned_query_texts.update(clean_query_texts(query_text))
-    return list(cleaned_query_texts)
+            cleaned.update(clean_query_texts(query_text))
+    return list(cleaned)
 
 
 def populate_query_embedding_cache(
@@ -492,6 +764,14 @@ def query_all_collections(
     stop = time.time()
     print(f"Time taken to run embedding functions: {stop - start:.2f} seconds")
 
+    query_info_map = {}
+    for qt in cleaned_query_texts:
+        query_info_map[qt] = extract_date_filter_from_query(qt)
+        query_info_map[qt]["is_pure_date_query"] = (
+            len(tokenize_document(query_info_map[qt]["clean_query_text"])["tokens"])
+            == 0
+        )
+
     combined_query_results = {
         "ids": [],
         "documents": [],
@@ -500,6 +780,7 @@ def query_all_collections(
         "query_text": [],
         "collection": [],
     }
+
     collection_names = collection_dict.keys()
     for col_name in collection_names:
         col_type = collection_type_rev_map.get(col_name) or "sentence"
@@ -512,24 +793,63 @@ def query_all_collections(
         if collection.count() == 0:
             continue
 
-        query_dict = {
+        all_query_dict = {
             qt: query_embedding_cache.get(qt, {}).get(id(collection_ef)) or []
             for qt in query_embedding_cache
         }
-        query_results_dict = semantic_search_collection(
-            collection=collection, query_dict=query_dict, n_results=n_results
-        )
-        if query_results_dict:
-            for key in combined_query_results:
-                combined_query_results[key].extend(query_results_dict.get(key, []))
 
-    if combined_query_results:
-        combined_query_results = pd.DataFrame(combined_query_results)
+        lexical_query_dict = {
+            qt: emb
+            for qt, emb in all_query_dict.items()
+            if not query_info_map.get(qt, {}).get("is_pure_date_query", False)
+        }
+        semantic_query_dict = lexical_query_dict
+
+        if lexical_query_dict:
+            lexical_query_results_dict = lexical_search_collection(
+                collection=collection,
+                query_dict=lexical_query_dict,
+                n_results=min(n_results * 50, 500),
+            )
+            if lexical_query_results_dict:
+                for key in combined_query_results:
+                    combined_query_results[key].extend(
+                        lexical_query_results_dict.get(key, [])
+                    )
+
+        if col_name == "context_narrative":
+            chrono_query_results_dict = chronological_search_collection(
+                collection=collection,
+                query_texts=list(all_query_dict.keys()),
+                date_field="master_date",
+                n_results=min(n_results * 50, 500),
+            )
+            if chrono_query_results_dict:
+                for key in combined_query_results:
+                    combined_query_results[key].extend(
+                        chrono_query_results_dict.get(key, [])
+                    )
+
+        if semantic_query_dict:
+            semantic_query_results_dict = semantic_search_collection(
+                collection=collection,
+                query_dict=semantic_query_dict,
+                n_results=min(n_results * 10, 500),
+            )
+            if semantic_query_results_dict:
+                for key in combined_query_results:
+                    combined_query_results[key].extend(
+                        semantic_query_results_dict.get(key, [])
+                    )
+
+    combined_query_results = pd.DataFrame(combined_query_results)
 
     final_results = {}
     for query_text in query_texts:
         result = get_final_results(
-            query_text, combined_query_results, n_results=n_results
+            normalize_query_text(query_text),
+            combined_query_results,
+            n_results=n_results,
         )
         final_results[str(query_text)] = {k: list(result[k]) for k in result}
 

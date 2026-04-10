@@ -4,6 +4,7 @@ import hashlib
 import json
 import warnings
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 
@@ -37,6 +38,9 @@ class IngestResult:
     metadata_updated_keys: list[str] = field(default_factory=list)
     populated_keys: list[str] = field(default_factory=list)
     chroma_indexed_keys: list[str] = field(default_factory=list)
+    failed_keys: list[str] = field(default_factory=list)
+    rate_limited_keys: list[str] = field(default_factory=list)
+    error_details: dict[str, dict[str, str]] = field(default_factory=dict)
     timings: dict[str, float] = field(default_factory=dict)
 
 
@@ -120,13 +124,17 @@ def populate_missing(
     descriptions: dict,
     missing_keys: list[str],
     config: IngestConfig,
-) -> tuple[dict, list[str]]:
+) -> tuple[dict, list[str], list[str], list[str], dict[str, dict[str, str]]]:
     if not missing_keys or not config.genai_client:
-        return descriptions, []
+        return descriptions, [], [], [], {}
 
     new_descriptions = {}
     populated_keys = []
-    for missing_key in missing_keys:
+    failed_keys = []
+    rate_limited_keys = []
+    error_details: dict[str, dict[str, str]] = {}
+
+    for index, missing_key in enumerate(missing_keys):
         metadata = descriptions[missing_key]["metadata"]
         try:
             description = describe_image(config.genai_client, metadata)
@@ -136,16 +144,38 @@ def populate_missing(
                     "metadata": metadata,
                 }
                 populated_keys.append(missing_key)
+            else:
+                failed_keys.append(missing_key)
+                error_details[missing_key] = {
+                    "stage": "description",
+                    "reason": "No description was generated for this media item.",
+                }
         except genai.errors.APIError as exc:
             if str(exc.code) == "429":
+                rate_limited_keys = missing_keys[index:]
+                for key in rate_limited_keys:
+                    error_details[key] = {
+                        "stage": "description",
+                        "reason": "Gemini quota reached while generating descriptions.",
+                    }
                 warnings.warn(
                     "Received Gemini 'APIError' while running 'describe_image': "
                     "Quota reached. Stopping image analysis.",
                 )
                 break
             print("Received Gemini 'APIError' while running 'describe_image':", exc)
+            failed_keys.append(missing_key)
+            error_details[missing_key] = {
+                "stage": "description",
+                "reason": str(exc),
+            }
         except Exception as exc:
             print("Reached an Exception while running 'describe_image':", exc)
+            failed_keys.append(missing_key)
+            error_details[missing_key] = {
+                "stage": "description",
+                "reason": str(exc),
+            }
 
         if len(new_descriptions) >= config.batch_size:
             upsert_dict_objects(new_descriptions, config.mongo_collection)
@@ -159,7 +189,13 @@ def populate_missing(
     if config.verbose:
         print(json.dumps(descriptions, indent=2))
 
-    return descriptions, populated_keys
+    return (
+        descriptions,
+        populated_keys,
+        failed_keys,
+        rate_limited_keys,
+        error_details,
+    )
 
 
 def has_description(entry: dict) -> bool:
@@ -167,15 +203,41 @@ def has_description(entry: dict) -> bool:
     return bool(description and description.get("content"))
 
 
-def ingest_index(folder_dict: dict, config: IngestConfig) -> IngestResult:
+def has_chroma_index(entry: dict) -> bool:
+    indexing = entry.get("indexing") or {}
+    return bool(indexing.get("chroma_indexed_at"))
+
+
+def mark_chroma_indexed(entry_ids: list[str], config: IngestConfig) -> str | None:
+    if not entry_ids:
+        return None
+
+    indexed_at = datetime.now(timezone.utc).isoformat()
+    upsert_dict_objects(
+        objects={
+            entry_id: {"indexing.chroma_indexed_at": indexed_at}
+            for entry_id in entry_ids
+        },
+        collection=config.mongo_collection,
+    )
+    return indexed_at
+
+
+def ingest_index(
+    folder_dict: dict,
+    config: IngestConfig,
+) -> IngestResult:
     timings = {}
 
     start = perf_counter()
     descriptions, missing_keys, found_objects = fetch_existing(folder_dict, config)
     timings["fetch_existing"] = perf_counter() - start
+    missing_keys = sorted(set(missing_keys))
 
     duplicate_existing_keys = sorted(
-        set(found_objects).difference(missing_keys)
+        key
+        for key, entry in found_objects.items()
+        if has_description(entry) and has_chroma_index(entry)
     )
     keys_to_update = None
     if not config.update_existing_metadata:
@@ -191,7 +253,13 @@ def ingest_index(folder_dict: dict, config: IngestConfig) -> IngestResult:
     timings["update_metadata"] = perf_counter() - start
 
     start = perf_counter()
-    descriptions, populated_keys = populate_missing(
+    (
+        descriptions,
+        populated_keys,
+        failed_keys,
+        rate_limited_keys,
+        error_details,
+    ) = populate_missing(
         descriptions=descriptions,
         missing_keys=missing_keys,
         config=config,
@@ -199,18 +267,33 @@ def ingest_index(folder_dict: dict, config: IngestConfig) -> IngestResult:
     timings["populate_missing"] = perf_counter() - start
 
     if config.update_existing_metadata:
-        chroma_entries = descriptions
-    else:
-        chroma_keys = set(missing_keys).union(populated_keys)
         chroma_entries = {
-            key: descriptions[key]
-            for key in chroma_keys
-            if key in descriptions and has_description(descriptions[key])
+            key: entry
+            for key, entry in descriptions.items()
+            if has_description(entry)
+        }
+    else:
+        chroma_entries = {
+            key: entry
+            for key, entry in descriptions.items()
+            if has_description(entry) and not has_chroma_index(entry)
         }
 
     start = perf_counter()
-    if chroma_entries:
-        populate_db(entries=chroma_entries, chroma_client=config.chroma_client)
+    chroma_indexed_keys: list[str] = []
+    if chroma_entries and config.chroma_client:
+        populate_db(
+            entries=chroma_entries,
+            chroma_client=config.chroma_client,
+            overwrite=config.update_existing_metadata,
+        )
+        indexed_at = mark_chroma_indexed(list(chroma_entries), config)
+        if indexed_at:
+            for key in chroma_entries:
+                descriptions.setdefault(key, {}).setdefault("indexing", {})[
+                    "chroma_indexed_at"
+                ] = indexed_at
+        chroma_indexed_keys = list(chroma_entries)
     timings["populate_chroma"] = perf_counter() - start
 
     return IngestResult(
@@ -220,7 +303,10 @@ def ingest_index(folder_dict: dict, config: IngestConfig) -> IngestResult:
         duplicate_existing_keys=duplicate_existing_keys,
         metadata_updated_keys=metadata_updated_keys,
         populated_keys=populated_keys,
-        chroma_indexed_keys=list(chroma_entries),
+        chroma_indexed_keys=chroma_indexed_keys,
+        failed_keys=failed_keys,
+        rate_limited_keys=rate_limited_keys,
+        error_details=error_details,
         timings=timings,
     )
 
@@ -245,6 +331,9 @@ def ingest_files(
         metadata_overrides=metadata_overrides,
     )
     index_seconds = perf_counter() - start
-    result = ingest_index(folder_dict=folder_dict, config=config)
+    result = ingest_index(
+        folder_dict=folder_dict,
+        config=config,
+    )
     result.timings = {"index_files": index_seconds, **result.timings}
     return result

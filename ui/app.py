@@ -8,6 +8,7 @@ import streamlit as st
 from ui.components import (
     clear_selected_entry_id,
     detail_dialog,
+    dialog_options,
     get_selected_entry_id,
     render_app_shell,
     render_results_grid,
@@ -29,8 +30,7 @@ from ui.history import (
 )
 
 EMPTY_STATE = (
-    "Enter a search to browse the indexed media library. Results stay on this page "
-    "while details open as an overlay."
+    "Describe the photo, video, or text you want to find."
 )
 
 
@@ -54,7 +54,7 @@ def initialize_state() -> None:
 
 
 def render_navbar() -> str:
-    _, nav_col, _ = st.columns([1, 3.4, 1])
+    _, nav_col, _ = st.columns([0.9, 4.8, 0.9])
     with nav_col:
         page = st.radio(
             "Navigation",
@@ -67,27 +67,41 @@ def render_navbar() -> str:
     return page
 
 
-def render_history_controls() -> dict | None:
+def render_history_body() -> None:
     history = load_history()
     if not history:
-        return None
+        st.info("No saved searches yet.")
+        return
 
-    _, history_col, _ = st.columns([1.7, 3.6, 1.7])
-    with history_col, st.expander("Search history", expanded=False):
-        selected_index = st.selectbox(
-            "Saved searches",
-            range(len(history)),
-            format_func=lambda index: history_label(history[index], index),
-        )
-        load_col, flush_col = st.columns(2)
-        with load_col:
-            should_load = st.button("Load saved results", use_container_width=True)
-        with flush_col:
-            if st.button("Flush history", use_container_width=True):
-                clear_history()
-                st.rerun()
+    selected_index = st.selectbox(
+        "Saved searches",
+        range(len(history)),
+        format_func=lambda index: history_label(history[index], index),
+        key="search_history_selected_index",
+    )
+    load_col, flush_col = st.columns(2)
+    with load_col:
+        if st.button("Load results", key="search_history_load", type="primary"):
+            st.session_state["history_item_to_load"] = history[selected_index]
+            clear_selected_entry_id()
+            st.rerun()
+    with flush_col:
+        if st.button("Clear history", key="search_history_clear"):
+            clear_history()
+            st.rerun()
 
-    return history[selected_index] if should_load else None
+
+if hasattr(st, "dialog"):
+
+    @st.dialog("Search History", **dialog_options(width="large"))
+    def search_history_dialog():
+        render_history_body()
+
+else:
+
+    def search_history_dialog():
+        with st.expander("Search History", expanded=True):
+            render_history_body()
 
 
 def restore_search_state(item: dict) -> None:
@@ -110,30 +124,44 @@ def load_saved_result(item: dict) -> tuple[list[str], dict, list[float | None], 
 
 
 def render_search_controls() -> bool:
-    _, search_col, _ = st.columns([1.7, 3.6, 1.7])
+    _, search_col, _ = st.columns([0.8, 5.4, 0.8])
     with search_col:
-        st.text_input(
-            "Search",
-            key="search_query",
-            placeholder="Try “beach sunrise”, “group photo”, or “receipt text”",
-            label_visibility="collapsed",
-        )
-
-        settings_col, search_button_col = st.columns([1, 1], gap="small")
-        with settings_col:
-            if st.button(
-                "Configure",
-                key="search_configure",
-                use_container_width=True,
-            ):
-                search_settings_dialog()
-        with search_button_col:
-            submitted = st.button(
+        with st.form("search_form", clear_on_submit=False):
+            st.text_input(
                 "Search",
-                key="search_submit",
-                type="primary",
-                use_container_width=True,
+                key="search_query",
+                placeholder="Try “beach sunrise”, “group photo”, or “receipt text”",
+                label_visibility="collapsed",
             )
+
+            _, search_button_col, history_col, settings_col = st.columns(
+                [5.6, 0.72, 0.56, 0.56],
+                gap="small",
+            )
+            with search_button_col:
+                submitted = st.form_submit_button(
+                    "↗",
+                    type="primary",
+                    key="search_submit",
+                    help="Run search",
+                )
+            with history_col:
+                open_history = st.form_submit_button(
+                    "↺",
+                    key="search_history",
+                    help="Search history",
+                )
+            with settings_col:
+                configure = st.form_submit_button(
+                    "⚙",
+                    key="search_configure",
+                    help="Configure search",
+                )
+
+        if open_history:
+            search_history_dialog()
+        if configure:
+            search_settings_dialog()
 
         filters = active_filters_from_state(st.session_state)
         filter_note = " with filters" if filters_are_active(filters) else ""
@@ -144,6 +172,13 @@ def render_search_controls() -> bool:
         )
 
     return submitted
+
+
+def render_empty_state() -> None:
+    st.markdown(
+        f'<div class="empty-state muted">{EMPTY_STATE}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def search(query: str, top_n: int) -> tuple[list[str], dict, list[float], float]:
@@ -187,7 +222,7 @@ def main() -> None:
         render_gallery_page()
         return
 
-    history_item = render_history_controls()
+    history_item = st.session_state.pop("history_item_to_load", None)
     if history_item:
         clear_selected_entry_id()
         with st.spinner("Loading saved results..."):
@@ -213,7 +248,7 @@ def main() -> None:
         filters = active_filters_from_state(st.session_state)
         if not query:
             st.warning("Enter a query first.")
-            st.info(EMPTY_STATE)
+            render_empty_state()
             return
 
         try:
@@ -256,7 +291,10 @@ def main() -> None:
     scores = st.session_state.get("last_result_scores", [])
 
     if not ids:
-        st.info("No results found." if submitted else EMPTY_STATE)
+        if submitted:
+            st.info("No results found.")
+        else:
+            render_empty_state()
         return
 
     elapsed_ms = st.session_state.get("last_search_ms")

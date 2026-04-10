@@ -9,7 +9,6 @@ from google import genai
 from utils.chroma import get_chroma_client
 from utils.ingest import IngestConfig, ingest_folder
 
-
 DEFAULT_API_NAME = "gemini"
 DEFAULT_MODEL_NAME = "gemini-2.5-flash-lite"
 DEFAULT_IMAGES_ROOT = "images_root"

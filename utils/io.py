@@ -4,13 +4,16 @@ io.py
 Contains utilities to understand folder structure, read media and read associated metadata for clearer context and better standardization.
 """
 
-import os, platform, json, hashlib, warnings
-from datetime import datetime, timezone, timedelta
-from timezonefinder import TimezoneFinder
-from zoneinfo import ZoneInfo
+import os, json, hashlib, warnings
 
 from PIL import Image, ExifTags
 from PIL.TiffImagePlugin import IFDRational
+
+from utils.date import (
+    extract_ifd_date_items,
+    get_os_dates,
+    resolve_dates,
+)
 
 IFD_CODES = {i.value: i.name for i in ExifTags.IFD}
 IM_TYPES = [
@@ -46,16 +49,6 @@ COMPAT_TYPES = [
     "wmv",
     "3gpp",
 ]
-DATE_KEYS = (
-    "creation_date",
-    "modification_date",
-    "index_date",
-    "DateTime",
-    "DateTimeOriginal",
-    "DateTimeDigitized",
-    "GPSDateStamp",
-)
-TF = TimezoneFinder()
 EXIF_WHITELIST = {
     # File
     "Filename",
@@ -156,134 +149,6 @@ def get_hash(file_path: str):
     raise ValueError(f"Unable to get file hash for: '{file_path}'")
 
 
-# Date Management
-def format_datetime(value):
-    def clean(dt):
-        if not dt:
-            return None
-        dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc) + timedelta(days=1)
-        return dt.isoformat() if 1980 <= dt.year and dt <= now else None
-
-    if isinstance(value, (float, int)):
-        return clean(datetime.fromtimestamp(value, tz=timezone.utc))
-
-    if isinstance(value, (list, tuple)):
-        return type(value)(format_datetime(v) for v in value)
-
-    if isinstance(value, str):
-        try:
-            return clean(datetime.fromisoformat(value))
-        except ValueError:
-            return None
-
-    return None
-
-
-def get_windows_times(file_path: str):
-    now = datetime.now().timestamp()
-    try:
-        ctime, mtime = os.path.getctime(file_path), os.path.getmtime(file_path)
-        return ctime, mtime, now
-    except (FileNotFoundError, PermissionError) as e:
-        warn(f"Error getting file times for {file_path}: {e}")
-    return now, now, now
-
-
-def get_unix_times(file_path: str):
-    now = datetime.now().timestamp()
-    try:
-        stat = os.stat(file_path)
-        try:
-            ctime = stat.st_birthtime
-        except AttributeError:
-            ctime = min(stat.st_mtime, stat.st_ctime)
-        mtime = os.path.getmtime(file_path)
-        return ctime, mtime, now
-    except (FileNotFoundError, PermissionError) as e:
-        warn(f"Error getting file times for {file_path}: {e}")
-    return now, now, now
-
-
-def get_time_function():
-    support_dict = {
-        "Windows": get_windows_times,
-        "Linux": get_unix_times,
-        "Darwin": get_unix_times,
-    }
-    curr_os = platform.system()
-    return support_dict.get(curr_os, get_unix_times)
-
-
-def get_os_dates(file_path: str):
-    creation_date, modification_date, index_date = get_time_function()(file_path)
-    return {
-        "creation_date": format_datetime(creation_date),
-        "modification_date": format_datetime(modification_date),
-        "index_date": datetime.fromtimestamp(index_date)
-        .astimezone()
-        .isoformat(),  # Use local timezone for index date
-    }
-
-
-def _resolve_date_values(vals: dict):
-    flags = []
-
-    if (
-        vals["creation_date"]
-        and vals["modification_date"]
-        and vals["creation_date"] > vals["modification_date"]
-    ):
-        vals["creation_date"] = vals["modification_date"]
-        flags.append("os_creation_after_modification_corrected")
-
-    created = (
-        vals["DateTimeOriginal"]
-        or vals["DateTimeDigitized"]
-        or vals["GPSDateStamp"]
-        or vals["creation_date"]
-    )
-    modified = vals["DateTime"] or vals["modification_date"]
-
-    if created and modified and modified < created:
-        flags.append("modification_before_creation")
-        if created == vals["creation_date"] and vals["DateTime"]:
-            created = modified
-            flags.append("os_creation_downgraded_to_modification")
-
-    return created, modified, flags
-
-
-def resolve_dates(dates: dict) -> dict:
-    vals = {k: dates.get(k) for k in DATE_KEYS}
-    created, modified, flags = _resolve_date_values(vals)
-
-    return {
-        "master_date": created or modified,
-        "true_creation_date": created,
-        "true_modification_date": modified,
-        "index_date": vals["index_date"],
-        "creation_date": vals["creation_date"],
-        "modification_date": vals["modification_date"],
-        "date_reliability": (
-            "invalid"
-            if not (created or modified)
-            else (
-                "high"
-                if vals["DateTimeOriginal"]
-                and "modification_before_creation" not in flags
-                else (
-                    "medium"
-                    if (vals["DateTimeDigitized"] or vals["GPSDateStamp"])
-                    and "modification_before_creation" not in flags
-                    else "low"
-                )
-            )
-        ),
-        "flags": flags,
-    }
-
-
 # Metadata cleaning and extraction
 def clean_exif_tags(extracted_meta: dict):
     clean_meta = {}
@@ -295,73 +160,6 @@ def clean_exif_tags(extracted_meta: dict):
         elif key in EXIF_WHITELIST:
             clean_meta[key] = value
     return clean_meta
-
-
-def get_local_gps_time(gps_info: dict, utc_dt: datetime) -> str:
-    """Finds timezone from coordinates and shifts UTC time to Local time."""
-    lat, lat_ref = gps_info.get("GPSLatitude"), gps_info.get("GPSLatitudeRef")
-    lon, lon_ref = gps_info.get("GPSLongitude"), gps_info.get("GPSLongitudeRef")
-
-    if lat and lat_ref and lon and lon_ref:
-        try:
-            lat_dec = float(lat[0]) + float(lat[1]) / 60 + float(lat[2]) / 3600
-            if lat_ref.upper() == "S":
-                lat_dec = -lat_dec
-
-            lon_dec = float(lon[0]) + float(lon[1]) / 60 + float(lon[2]) / 3600
-            if lon_ref.upper() == "W":
-                lon_dec = -lon_dec
-
-            tz_str = TF.timezone_at(lng=lon_dec, lat=lat_dec)
-            if tz_str:
-                return utc_dt.astimezone(ZoneInfo(tz_str)).isoformat()
-        except Exception as e:
-            warn(f"Error converting GPS time to local: {e}")
-    return utc_dt.isoformat()
-
-
-def extract_ifd_date_items(ifd_name: str, ifd_data: dict, date_items: dict):
-    if ifd_name == "Exif":
-        temp_date_items = {}
-        dt_keys = {
-            "DateTime": ["SubsecTime", "OffsetTime"],
-            "DateTimeOriginal": ["SubsecTimeOriginal", "OffsetTimeOriginal"],
-            "DateTimeDigitized": ["SubsecTimeDigitized", "OffsetTimeDigitized"],
-        }
-        for base_key, (ss_key, ofs_key) in dt_keys.items():
-            if base_key not in ifd_data:
-                continue
-
-            raw_date = str(ifd_data.get(base_key, "")).strip()
-            if not raw_date:
-                continue
-
-            base_date = raw_date.replace(":", "-", 2).replace(" ", "T", 1)
-            subsec = str(ifd_data.get(ss_key, "000")).strip()
-            offset = str(ifd_data.get(ofs_key, "+00:00")).strip()
-
-            temp_date_items[base_key] = format_datetime(f"{base_date}.{subsec}{offset}")
-        date_items.update(temp_date_items)
-
-    elif ifd_name == "GPSInfo":
-        raw_date = ifd_data.get("GPSDateStamp", None)
-        if not raw_date:
-            return date_items
-
-        gps_date = str(raw_date).replace(":", "-", 2)
-        h_raw, m_raw, s_raw = ifd_data.get("GPSTimeStamp", [0.0, 0.0, 0.0])
-        h, m, s_float, s_int = int(h_raw), int(m_raw), float(s_raw), int(s_raw)
-        ss = int(round((s_float % 1) * 1_000_000))
-
-        base_utc_str = f"{gps_date}T{h:02d}:{m:02d}:{s_int:02d}.{ss:06d}+00:00".strip()
-        try:
-            base_utc_date = datetime.fromisoformat(base_utc_str)
-            date_items["GPSDateStamp"] = format_datetime(
-                get_local_gps_time(ifd_data, base_utc_date)
-            )
-        except Exception as e:
-            warn(f"Error parsing GPS datetime: {e}")
-    return date_items
 
 
 def get_exif_dict(img_exif: dict, extracted_meta: dict):

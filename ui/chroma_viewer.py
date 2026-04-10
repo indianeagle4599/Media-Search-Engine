@@ -121,7 +121,6 @@ def render_collection(collection, row_limit: int) -> None:
 
         event = st.dataframe(
             pd.DataFrame(rows),
-            use_container_width=True,
             hide_index=True,
             key=f"chroma_table_{collection.name}",
             on_select="rerun",
