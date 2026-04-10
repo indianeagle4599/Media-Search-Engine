@@ -13,7 +13,7 @@ from ui.config import (
     IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
 )
-from ui.data import entry_has_description
+from ui.data import entry_has_description, entry_is_fully_indexed
 from ui.formatting import get_entry_display_fields, get_summary, to_jsonable
 
 
@@ -156,11 +156,12 @@ def render_indexed_detail_body(
     metadata, file_path, file_name, ext = get_entry_display_fields(entry_id, entry)
     full_document = {"_id": entry_id, **entry}
     described = entry_has_description(entry)
+    fully_indexed = entry_is_fully_indexed(entry)
 
     st.subheader(file_name)
     st.caption(
         detail_caption(
-            rank, score, "Indexed media" if described else "Pending analysis"
+            rank, score, "Indexed media" if fully_indexed else "Pending indexing"
         )
     )
 
@@ -169,12 +170,18 @@ def render_indexed_detail_body(
         render_detail_media(file_path=file_path, ext=ext)
 
     with right:
-        if described:
+        if fully_indexed:
             st.markdown("**Summary**")
             st.write(get_summary(entry))
+        elif described:
+            st.markdown("**Indexing status**")
+            st.write("Waiting for Chroma")
+            st.caption(
+                "Description is stored in MongoDB. Chroma indexing has not completed yet."
+            )
         else:
             st.markdown("**Analysis status**")
-            st.write("Pending")
+            st.write("Waiting for description")
             st.caption(
                 "Metadata is stored. Description generation and Chroma indexing have not completed yet."
             )

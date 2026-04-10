@@ -82,6 +82,14 @@ def entry_has_description(entry: dict) -> bool:
     return bool((entry.get("description") or {}).get("content"))
 
 
+def entry_has_chroma_index(entry: dict) -> bool:
+    return bool((entry.get("indexing") or {}).get("chroma_indexed_at"))
+
+
+def entry_is_fully_indexed(entry: dict) -> bool:
+    return entry_has_description(entry) and entry_has_chroma_index(entry)
+
+
 def get_entry_upload_date(entry: dict) -> str:
     metadata = entry.get("metadata") or {}
     dates = metadata.get("dates") or {}
@@ -129,8 +137,12 @@ def dedupe_entries_by_hash(entries: list[dict]) -> list[dict]:
         if candidate_date > current_date:
             chosen[file_hash] = entry
             continue
-        if candidate_date == current_date and entry_has_description(entry):
-            chosen[file_hash] = entry
+        if candidate_date == current_date:
+            if entry_is_fully_indexed(entry) and not entry_is_fully_indexed(current):
+                chosen[file_hash] = entry
+                continue
+            if entry_has_description(entry) and not entry_has_description(current):
+                chosen[file_hash] = entry
 
     return list(chosen.values())
 

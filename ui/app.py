@@ -134,8 +134,8 @@ def render_search_controls() -> bool:
                 label_visibility="collapsed",
             )
 
-            history_col, settings_col, _, search_button_col = st.columns(
-                [0.56, 0.56, 5.6, 0.72],
+            _, search_button_col, history_col, settings_col = st.columns(
+                [5.6, 0.72, 0.56, 0.56],
                 gap="small",
             )
             with search_button_col:

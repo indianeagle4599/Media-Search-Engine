@@ -10,7 +10,7 @@ import streamlit as st
 from ui.config import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ui.data import (
     dedupe_entries_by_hash,
-    entry_has_description,
+    entry_is_fully_indexed,
     get_chroma_client,
     get_entry_creation_date,
     get_entry_upload_date,
@@ -226,7 +226,7 @@ def pending_upload_entries() -> list[dict]:
     entries = [
         entry
         for entry in dedupe_entries_by_hash(list_uploaded_entries())
-        if not entry_has_description(entry)
+        if not entry_is_fully_indexed(entry)
     ]
     return sorted(entries, key=lambda entry: get_entry_upload_date(entry))
 
@@ -378,7 +378,7 @@ def render_duplicate_controls(
 def render_upload_page() -> None:
     st.subheader("Upload Media")
     st.caption(
-        "Store uploads into `image_data` immediately, then analyze pending items when VLM capacity is available."
+        "Store uploads into `image_data` immediately, then finish description generation and Chroma indexing when capacity is available."
     )
 
     accepted_types = sorted(IMAGE_EXTENSIONS | VIDEO_EXTENSIONS)
@@ -457,7 +457,7 @@ def render_upload_page() -> None:
     st.markdown("**Pending analysis**")
     if latest_pending:
         st.caption(
-            f"{len(latest_pending)} uploaded file(s) are stored in MongoDB but still missing generated descriptions."
+            f"{len(latest_pending)} uploaded file(s) are stored in MongoDB but still missing generated descriptions or Chroma indexing."
         )
         st.dataframe(
             pending_table(latest_pending),

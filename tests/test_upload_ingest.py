@@ -59,6 +59,10 @@ def install_external_stubs():
     )
     sys.modules["streamlit"] = streamlit
 
+    dotenv = types.ModuleType("dotenv")
+    dotenv.load_dotenv = lambda *args, **kwargs: None
+    sys.modules["dotenv"] = dotenv
+
     google = types.ModuleType("google")
     genai = types.ModuleType("google.genai")
 
@@ -94,7 +98,7 @@ install_external_stubs()
 
 from utils.io import index_paths
 from utils import ingest
-from ui import components, data, gallery, media, upload
+from ui import app, components, data, gallery, media, upload
 
 
 def get_values(value, parts):
@@ -251,6 +255,68 @@ class IngestTests(unittest.TestCase):
         )
         populate_chroma_mock.assert_not_called()
 
+    def test_existing_description_without_chroma_marker_is_sent_to_chroma(self):
+        config = self.config(with_analysis=True)
+        entry_id = ingest.entry_id_for_file("filehash", config)
+        folder_dict = {
+            "filehash": {
+                "file_hash": "filehash",
+                "file_path": "/uploads/hash.jpg",
+                "file_name": "Upload.jpg",
+            }
+        }
+        existing = {
+            entry_id: {
+                "metadata": folder_dict["filehash"].copy(),
+                "description": {"content": {"summary": "done"}},
+            }
+        }
+
+        with (
+            patch.object(ingest, "check_if_exists", return_value=(existing, [])),
+            patch.object(ingest, "upsert_dict_objects") as upsert_mock,
+            patch.object(ingest, "populate_db") as populate_chroma_mock,
+        ):
+            result = ingest.ingest_index(folder_dict, config)
+
+        self.assertEqual(result.chroma_indexed_keys, [entry_id])
+        populate_chroma_mock.assert_called_once()
+        self.assertFalse(
+            result.descriptions[entry_id].get("indexing", {}).get("chroma_indexed_at")
+            is None
+        )
+        indexed_state = upsert_mock.call_args.kwargs["objects"][entry_id]
+        self.assertIn("indexing.chroma_indexed_at", indexed_state)
+
+    def test_existing_description_with_chroma_marker_is_not_reindexed(self):
+        config = self.config(with_analysis=True)
+        entry_id = ingest.entry_id_for_file("filehash", config)
+        folder_dict = {
+            "filehash": {
+                "file_hash": "filehash",
+                "file_path": "/uploads/hash.jpg",
+                "file_name": "Upload.jpg",
+            }
+        }
+        existing = {
+            entry_id: {
+                "metadata": folder_dict["filehash"].copy(),
+                "description": {"content": {"summary": "done"}},
+                "indexing": {"chroma_indexed_at": "2026-04-10T10:00:00+00:00"},
+            }
+        }
+
+        with (
+            patch.object(ingest, "check_if_exists", return_value=(existing, [])),
+            patch.object(ingest, "upsert_dict_objects") as upsert_mock,
+            patch.object(ingest, "populate_db") as populate_chroma_mock,
+        ):
+            result = ingest.ingest_index(folder_dict, config)
+
+        self.assertEqual(result.chroma_indexed_keys, [])
+        populate_chroma_mock.assert_not_called()
+        upsert_mock.assert_not_called()
+
 
 class UploadFlowTests(unittest.TestCase):
     def setUp(self):
@@ -354,7 +420,7 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(override["file_name"], "New.jpg")
         self.assertEqual(override["uploaded_at"], seen_at.astimezone().isoformat())
 
-    def test_pending_analysis_is_derived_from_missing_description(self):
+    def test_pending_uploads_include_missing_description_and_missing_chroma(self):
         with patch.object(
             upload,
             "list_uploaded_entries",
@@ -370,7 +436,7 @@ class UploadFlowTests(unittest.TestCase):
                     "description": {},
                 },
                 {
-                    "_id": "indexed",
+                    "_id": "pending-chroma",
                     "metadata": {
                         "file_hash": "two",
                         "file_path": "/uploads/two.jpg",
@@ -379,11 +445,27 @@ class UploadFlowTests(unittest.TestCase):
                     },
                     "description": {"content": {"summary": "done"}},
                 },
+                {
+                    "_id": "indexed",
+                    "metadata": {
+                        "file_hash": "three",
+                        "file_path": "/uploads/three.jpg",
+                        "file_name": "three.jpg",
+                        "uploaded_at": "2026-04-08T12:02:00+00:00",
+                    },
+                    "description": {"content": {"summary": "done"}},
+                    "indexing": {
+                        "chroma_indexed_at": "2026-04-08T12:03:00+00:00"
+                    },
+                },
             ],
         ):
             pending = upload.pending_upload_entries()
 
-        self.assertEqual([entry["_id"] for entry in pending], ["pending"])
+        self.assertEqual(
+            [entry["_id"] for entry in pending],
+            ["pending", "pending-chroma"],
+        )
 
     def test_retry_pending_uploads_after_quota_returns(self):
         pending_entry = {
@@ -460,6 +542,7 @@ class GalleryTests(unittest.TestCase):
                     "dates": {"true_creation_date": "2022-01-01T00:00:00+00:00"},
                 },
                 "description": {"content": {"summary": "done"}},
+                "indexing": {"chroma_indexed_at": "2026-04-10T08:05:00+00:00"},
             },
             {
                 "_id": "b",
@@ -472,6 +555,7 @@ class GalleryTests(unittest.TestCase):
                     "dates": {"true_creation_date": "2024-06-01T00:00:00+00:00"},
                 },
                 "description": {"content": {"summary": "done"}},
+                "indexing": {"chroma_indexed_at": "2026-04-08T08:05:00+00:00"},
             },
             {
                 "_id": "c",
@@ -501,7 +585,7 @@ class GalleryTests(unittest.TestCase):
             )
 
         self.assertEqual([record["_id"] for record in records], ["b", "a", "c"])
-        self.assertEqual(records[2]["status"], "pending_analysis")
+        self.assertEqual(records[2]["status"], "pending_indexing")
 
     def test_gallery_metadata_markup_uses_labeled_rows(self):
         markup = gallery.gallery_metadata_markup(
@@ -530,6 +614,19 @@ class DetailStateTests(unittest.TestCase):
             )
         )
         self.assertFalse(data.entry_has_description({"description": {}}))
+        self.assertTrue(
+            data.entry_is_fully_indexed(
+                {
+                    "description": {"content": {"summary": "done"}},
+                    "indexing": {"chroma_indexed_at": "2026-04-10T10:00:00+00:00"},
+                }
+            )
+        )
+        self.assertFalse(
+            data.entry_is_fully_indexed(
+                {"description": {"content": {"summary": "done"}}}
+            )
+        )
 
     def test_result_preview_click_uses_session_modal_state(self):
         def click_button(*args, **kwargs):
@@ -620,6 +717,53 @@ class DetailStateTests(unittest.TestCase):
             "gallery-card__meta",
             render_media_card.call_args.kwargs["overlay_details_html"],
         )
+
+
+class SearchControlsTests(unittest.TestCase):
+    def setUp(self):
+        app.st.session_state.clear()
+        app.st.session_state["top_n"] = 10
+
+    def test_enter_submission_path_is_reserved_for_search(self):
+        class DummyContext:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def make_columns(spec, **kwargs):
+            return [DummyContext() for _ in spec]
+
+        with (
+            patch.object(app.st, "columns", side_effect=make_columns, create=True) as columns_mock,
+            patch.object(app.st, "form", return_value=DummyContext(), create=True),
+            patch.object(app.st, "text_input", create=True),
+            patch.object(
+                app.st,
+                "form_submit_button",
+                return_value=False,
+                create=True,
+            ) as submit_mock,
+            patch.object(app.st, "markdown", create=True),
+            patch.object(app, "active_filters_from_state", return_value={}),
+            patch.object(app, "filters_are_active", return_value=False),
+            patch.object(app, "search_history_dialog") as history_dialog_mock,
+            patch.object(app, "search_settings_dialog") as settings_dialog_mock,
+        ):
+            submitted = app.render_search_controls()
+
+        self.assertFalse(submitted)
+        self.assertEqual(
+            columns_mock.call_args_list[1].args[0],
+            [5.6, 0.72, 0.56, 0.56],
+        )
+        self.assertEqual(
+            [call.kwargs["key"] for call in submit_mock.call_args_list],
+            ["search_submit", "search_history", "search_configure"],
+        )
+        history_dialog_mock.assert_not_called()
+        settings_dialog_mock.assert_not_called()
 
 
 class MediaTests(unittest.TestCase):

@@ -14,7 +14,7 @@ from ui.components import (
 from ui.config import IMAGE_EXTENSIONS
 from ui.data import (
     dedupe_entries_by_hash,
-    entry_has_description,
+    entry_is_fully_indexed,
     get_entries,
     get_entry_creation_date,
     get_entry_upload_date,
@@ -46,7 +46,7 @@ def build_gallery_record(entry: dict) -> dict:
         "ext": ext,
         "uploaded_at": get_entry_upload_date(entry),
         "creation_date": get_entry_creation_date(entry),
-        "status": "indexed" if entry_has_description(entry) else "pending_analysis",
+        "status": "indexed" if entry_is_fully_indexed(entry) else "pending_indexing",
     }
 
 
@@ -144,7 +144,9 @@ def render_gallery_detail() -> None:
 
 def render_gallery_page() -> None:
     st.subheader("Gallery")
-    st.caption("Browse uploaded images stored in `image_data`. Description presence determines whether an item is fully indexed or still pending.")
+    st.caption(
+        "Browse uploaded images stored in `image_data`. Files stay pending until both descriptions and Chroma indexing are complete."
+    )
 
     sort_col, limit_col = st.columns([2, 1])
     with sort_col:

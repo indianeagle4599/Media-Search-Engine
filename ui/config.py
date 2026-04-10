@@ -84,6 +84,15 @@ div[data-testid="stForm"] div[data-testid="stHorizontalBlock"] {
 .st-key-search_configure {
   align-self: end;
 }
+.st-key-search_history {
+  order: 1;
+}
+.st-key-search_configure {
+  order: 2;
+}
+.st-key-search_submit {
+  order: 3;
+}
 .st-key-search_submit button,
 .st-key-search_history button,
 .st-key-search_configure button {
