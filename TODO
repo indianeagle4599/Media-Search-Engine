@@ -1,6 +1,11 @@
 Next Up
 
-[ ] Create simple UI to find and display files
+[X] Update post-VLM metadata schema to use new, canonical dates.
+[X] Add Mongo update code to update metadata even if descriptions are not newly generated.
+[X] Create a mongo "test" data retreiver to quickly get random datapoints.
+
+[ ] Create a date-based retrieval function.
+[ ] Add keyword-matching and BM-25 searching options and add match-based score to current method.
 
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
@@ -21,6 +26,7 @@ Tasks
         [ ] Support metadata extraction for other file types like TIF, SVG, etc.
     [ ] Video metadata extraction and indexing support
 [ ] Media indexer improvements
+    [X] Move ingestion orchestration into reusable ingest utilities.
     [ ] VLM
         [ ] Create a multi-API setup to leverage free tier extractions
         [ ] Check options for batch predictions
@@ -39,9 +45,14 @@ Tasks
     [ ] Add RAG-based search features.
     [ ] Add Agentic search utils for specialised searching.
 [ ] UI
-    [ ] Create simple UI to find and display files
+    [X] Polish detail modal, fullscreen media view, and gallery card UX.
+    [ ] Add collection filters once query results expose per-result collection metadata.
+    [ ] Add a query debugging panel showing per-collection scores and matched fields.
+    [ ] Add relevance feedback controls for search results to support ranking evaluation.
+    [ ] Add actions to open/copy original file paths from the detail modal.
     [ ] Add a Chat option as relevant.
 [ ] Good SDE practices
     [ ] Leverage branches for feature development.
     [ ] Setup Pytest and design test cases for various functions.
+    [X] Add focused upload and ingestion unit tests.
     [ ] Add docstrings

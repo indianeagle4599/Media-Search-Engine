@@ -5,3 +5,4 @@
 images_root*
 .chromadb*
 json_outs*
+.codex*

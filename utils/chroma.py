@@ -4,9 +4,8 @@ chroma.py
 Contains utilities to create, update and use a chromadb for storing and querying from the descriptions of all images.
 """
 
-import json, re
-
-import chromadb
+import chromadb, json, os, re
+from datetime import datetime
 from chromadb.utils.batch_utils import create_batches
 from chromadb.utils.embedding_functions.ollama_embedding_function import (
     OllamaEmbeddingFunction,
@@ -162,6 +161,30 @@ def tokenize_document(document: str):
         "token_string": token_string,
         "token_count": token_count,
     }
+
+
+def get_chroma_client(
+    path: str | None = None,
+    host: str | None = None,
+    port: int | str | None = None,
+    ssl: bool | None = None,
+):
+    host = host or os.getenv("CHROMA_HOST") or os.getenv("CHROMA_SERVER_HOST")
+    if host:
+        port = int(port or os.getenv("CHROMA_PORT") or 8000)
+        if ssl is None:
+            ssl = os.getenv("CHROMA_SSL", "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+        return chromadb.HttpClient(host=host, port=port, ssl=ssl)
+
+    path = path or os.getenv("CHROMA_URL")
+    if not path:
+        raise RuntimeError("Set CHROMA_URL or CHROMA_HOST/CHROMA_SERVER_HOST.")
+
+    return chromadb.PersistentClient(path=path)
 
 
 def prep_dict_for_upsert(field_dict: dict):
@@ -554,6 +577,42 @@ def lexical_search_collection(
     return query_results_dict
 
 
+def delete_entry_ids(chroma_client, entry_ids: list[str]):
+    if not chroma_client or not entry_ids:
+        return
+
+    try:
+        collections = chroma_client.list_collections()
+    except Exception:
+        return
+
+    prefixes = tuple(f"{entry_id}_" for entry_id in entry_ids)
+    direct_ids = set(entry_ids)
+
+    for collection_item in collections:
+        collection_name = (
+            collection_item.name
+            if hasattr(collection_item, "name")
+            else collection_item
+        )
+        if not collection_name:
+            continue
+
+        try:
+            collection = chroma_client.get_collection(collection_name)
+            existing_ids = collection.get(include=[]).get("ids", [])
+        except Exception:
+            continue
+
+        ids_to_delete = [
+            item_id
+            for item_id in existing_ids
+            if item_id in direct_ids or item_id.startswith(prefixes)
+        ]
+        if ids_to_delete:
+            collection.delete(ids=ids_to_delete)
+
+
 def semantic_search_collection(
     collection: chromadb.Collection, query_dict: dict, n_results: int = 50
 ):
@@ -622,8 +681,10 @@ def get_final_results(
         return pd.DataFrame(columns=["ids", "score", "rank"])
 
     relevant_df["ids"] = relevant_df["ids"].astype(str).str[:105]
-    chrono_mask = relevant_df["collection"].astype(str).str.startswith(
-        "context_narrative_chrono_"
+    chrono_mask = (
+        relevant_df["collection"]
+        .astype(str)
+        .str.startswith("context_narrative_chrono_")
     )
     if chrono_mask.any():
         chrono_df = relevant_df[chrono_mask].copy()
@@ -639,8 +700,7 @@ def get_final_results(
                 "documents": [""] * len(chrono_vals),
                 "distances": -chrono_vals.values,
                 "rank": list(range(1, len(chrono_vals) + 1)),
-                "query_text": [relevant_df["query_text"].iloc[0]]
-                * len(chrono_vals),
+                "query_text": [relevant_df["query_text"].iloc[0]] * len(chrono_vals),
                 "collection": ["context_narrative_chrono"] * len(chrono_vals),
             }
         )
