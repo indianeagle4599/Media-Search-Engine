@@ -4,9 +4,9 @@ io.py
 Contains utilities to understand folder structure, read media and read associated metadata for clearer context and better standardization.
 """
 
-import os, json, hashlib, warnings
+import os, json, hashlib, warnings, io, mimetypes
 
-from PIL import Image, ExifTags
+from PIL import Image, ExifTags, ImageOps
 from PIL.TiffImagePlugin import IFDRational
 
 from utils.date import (
@@ -16,6 +16,8 @@ from utils.date import (
 )
 
 IFD_CODES = {i.value: i.name for i in ExifTags.IFD}
+HEIF_REGISTERED = False
+RESAMPLE = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 IM_TYPES = [
     "jpg",
     "jpeg",
@@ -30,6 +32,28 @@ IM_TYPES = [
     "svg",
 ]
 VI_TYPES = ["mp4", "mpeg", "mov", "avi", "x-flv", "mpg", "webm", "wmv", "3gpp"]
+MIME_TYPES = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+    "heic": "image/heic",
+    "heif": "image/heif",
+    "avif": "image/avif",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+    "svg": "image/svg+xml",
+    "mp4": "video/mp4",
+    "mpeg": "video/mpeg",
+    "mov": "video/quicktime",
+    "avi": "video/x-msvideo",
+    "x-flv": "video/x-flv",
+    "mpg": "video/mpeg",
+    "webm": "video/webm",
+    "wmv": "video/x-ms-wmv",
+    "3gpp": "video/3gpp",
+}
 COMPAT_TYPES = [
     # Images
     "jpg",
@@ -122,6 +146,117 @@ def warn(msg: str):
 
 def get_ext(path: str):
     return os.path.splitext(path)[-1][1:].lower()
+
+
+def get_mime_type(file_path: str, media_type: str = "") -> str:
+    ext = get_ext(file_path)
+    mime_type = MIME_TYPES.get(ext)
+    if mime_type:
+        return mime_type
+
+    guessed_type, _ = mimetypes.guess_type(file_path)
+    if guessed_type:
+        return guessed_type
+
+    if media_type and ext:
+        return f"{media_type}/{ext}"
+    return ""
+
+
+def ensure_heif_registered(file_path: str = "") -> None:
+    global HEIF_REGISTERED
+    if HEIF_REGISTERED or get_ext(file_path) not in {"heic", "heif"}:
+        return
+
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+    HEIF_REGISTERED = True
+
+
+def normalize_analysis_max_size(
+    max_width: int | None,
+    max_height: int | None,
+) -> tuple[int, int] | None:
+    width = int(max_width or 0)
+    height = int(max_height or 0)
+    if width <= 0 and height <= 0:
+        return None
+    if width <= 0:
+        width = 10000
+    if height <= 0:
+        height = 10000
+    return width, height
+
+
+def fit_image_size_within_bounds(
+    width: int,
+    height: int,
+    max_width: int | None,
+    max_height: int | None,
+) -> tuple[int, int]:
+    if width <= 0 or height <= 0:
+        raise ValueError("Image width and height must be positive integers.")
+
+    max_size = normalize_analysis_max_size(max_width, max_height)
+    if not max_size:
+        return width, height
+
+    width_scale = max_size[0] / width
+    height_scale = max_size[1] / height
+    scale = min(width_scale, height_scale, 1.0)
+    return max(1, int(width * scale)), max(1, int(height * scale))
+
+
+def read_file_bytes(file_path: str) -> bytes:
+    with open(file_path, "rb") as file:
+        return file.read()
+
+
+def get_analysis_image_bytes(
+    file_path: str,
+    mime_type: str = "",
+    *,
+    max_width: int | None = None,
+    max_height: int | None = None,
+    quality: int = 86,
+) -> tuple[bytes, str]:
+    max_size = normalize_analysis_max_size(max_width, max_height)
+    fallback_mime_type = mime_type or get_mime_type(file_path, "image")
+    if not max_size:
+        return read_file_bytes(file_path), fallback_mime_type
+
+    try:
+        ensure_heif_registered(file_path)
+        with Image.open(file_path) as image:
+            image = ImageOps.exif_transpose(image)
+            if image.mode == "P":
+                image = image.convert("RGBA")
+            elif image.mode not in {"RGB", "RGBA", "L", "LA"}:
+                image = image.convert("RGB")
+
+            target_size = fit_image_size_within_bounds(
+                image.width,
+                image.height,
+                max_size[0],
+                max_size[1],
+            )
+            if target_size == (image.width, image.height):
+                return read_file_bytes(file_path), fallback_mime_type
+
+            image = image.resize(target_size, RESAMPLE)
+            buffer = io.BytesIO()
+            if image.mode in {"RGBA", "LA"}:
+                image.save(buffer, format="PNG", optimize=True)
+                return buffer.getvalue(), "image/png"
+
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            image.save(buffer, format="JPEG", quality=quality, optimize=True)
+            return buffer.getvalue(), "image/jpeg"
+    except Exception as exc:
+        warn(f"Failed to create analysis proxy for '{file_path}': {exc}")
+        return read_file_bytes(file_path), fallback_mime_type
 
 
 def decode_bytes(data: bytes):
@@ -232,6 +367,7 @@ def build_file_metadata(
         "file_name": file,
         "media_type": media_type,
         "ext": file_ext,
+        "mime_type": get_mime_type(file_path, media_type),
         "is_compat": is_compat,
         "dates": {},
         "embedded_metadata": {},
@@ -248,6 +384,7 @@ def build_file_metadata(
         metadata["file_hash"] = file_hash
         metadata["file_path"] = file_path
         metadata["ext"] = file_ext
+        metadata["mime_type"] = get_mime_type(file_path, media_type)
 
     return file_hash, metadata
 

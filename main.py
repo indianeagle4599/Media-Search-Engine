@@ -4,25 +4,21 @@ import os
 
 import pymongo
 from dotenv import load_dotenv
-from google import genai
 
 from utils.chroma import get_chroma_client
-from utils.ingest import IngestConfig, ingest_folder
+from utils.ingest import (
+    build_ingest_config_from_env,
+    ingest_folder,
+)
+DEFAULT_IMAGES_ROOT = "images_root/test_folder"
 
-DEFAULT_API_NAME = "gemini"
-DEFAULT_MODEL_NAME = "gemini-2.5-flash-lite"
-DEFAULT_IMAGES_ROOT = "images_root"
 
-
-def build_ingest_config() -> IngestConfig:
-    return IngestConfig(
-        api_name=os.getenv("MEDIA_API_NAME", DEFAULT_API_NAME),
-        model_name=os.getenv("MEDIA_MODEL_NAME", DEFAULT_MODEL_NAME),
+def build_ingest_config():
+    return build_ingest_config_from_env(
         mongo_collection=pymongo.MongoClient(os.getenv("MONGO_URL"))[
             os.getenv("MONGO_DB_NAME")
         ][os.getenv("MONGO_COLLECTION_NAME")],
         chroma_client=get_chroma_client(path=os.getenv("CHROMA_URL")),
-        genai_client=genai.Client(api_key=os.getenv("GEM_API_KEY")),
         update_existing_metadata=True,
         verbose=True,
     )

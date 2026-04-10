@@ -82,8 +82,19 @@ def entry_has_description(entry: dict) -> bool:
     return bool((entry.get("description") or {}).get("content"))
 
 
+def get_entry_chroma_index_date(entry: dict) -> str:
+    metadata = entry.get("metadata") or {}
+    dates = metadata.get("dates") or {}
+    value = dates.get("chroma_indexed_at")
+    if value:
+        return str(value)
+
+    indexing = entry.get("indexing") or {}
+    return str(indexing.get("chroma_indexed_at") or "")
+
+
 def entry_has_chroma_index(entry: dict) -> bool:
-    return bool((entry.get("indexing") or {}).get("chroma_indexed_at"))
+    return bool(get_entry_chroma_index_date(entry))
 
 
 def entry_is_fully_indexed(entry: dict) -> bool:
