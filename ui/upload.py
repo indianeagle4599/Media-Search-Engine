@@ -8,18 +8,19 @@ import streamlit as st
 
 from ui.config import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ui.data import (
-    dedupe_entries_by_hash,
+    clear_uploaded_entries_cache,
+    clear_chroma_client_cache,
+    delete_uploaded_entry,
     entry_is_fully_indexed,
     get_chroma_client,
     get_entry_creation_date,
     get_entry_upload_date,
-    get_mongo_collection,
     get_upload_root,
     get_uploaded_entry_by_hash,
     list_uploaded_entries,
     normalize_path,
 )
-from utils.chroma import delete_entry_ids
+from utils.mongo import get_mongo_collection
 from utils.ingest import (
     DEFAULT_DESCRIPTION_RIGOR,
     build_ingest_config_from_env,
@@ -138,20 +139,6 @@ def selection_action(selection: dict, action_overrides: dict[str, str] | None = 
     return overrides.get(selection["file_hash"], selection["default_action"])
 
 
-def delete_existing_upload(file_hash: str) -> list[str]:
-    collection = get_mongo_collection()
-    entry_ids = [
-        str(document["_id"])
-        for document in collection.find({"metadata.file_hash": file_hash})
-    ]
-    if not entry_ids:
-        return []
-
-    delete_entry_ids(get_chroma_client(), entry_ids)
-    collection.delete_many({"_id": {"$in": entry_ids}})
-    return entry_ids
-
-
 def store_selected_uploads(
     selections: list[dict],
     action_overrides: dict[str, str] | None = None,
@@ -163,6 +150,7 @@ def store_selected_uploads(
     overrides: dict[str, dict] = {}
     stored_items = []
     results = []
+    mutated_existing_uploads = False
 
     for selection in selections:
         file_hash = selection["file_hash"]
@@ -182,7 +170,8 @@ def store_selected_uploads(
             continue
 
         if existing_entry:
-            delete_existing_upload(file_hash)
+            delete_uploaded_entry(file_hash, clear_cache=False)
+            mutated_existing_uploads = True
 
         ext = Path(selection["original_filename"]).suffix.lstrip(".").lower()
         stored_path = upload_storage_path(file_hash, ext, seen_at)
@@ -201,13 +190,20 @@ def store_selected_uploads(
         )
 
     if not file_paths:
+        if mutated_existing_uploads:
+            clear_uploaded_entries_cache()
         return results
 
-    ingest_files(
-        file_paths=file_paths,
-        config=config,
-        metadata_overrides=overrides,
-    )
+    try:
+        ingest_files(
+            file_paths=file_paths,
+            config=config,
+            metadata_overrides=overrides,
+        )
+    except Exception:
+        clear_uploaded_entries_cache()
+        raise
+    clear_uploaded_entries_cache()
     for item in stored_items:
         results.append(
             {
@@ -221,10 +217,11 @@ def store_selected_uploads(
     return results
 
 
-def pending_upload_entries() -> list[dict]:
+def pending_upload_entries(entries: list[dict] | None = None) -> list[dict]:
+    source_entries = list_uploaded_entries() if entries is None else entries
     entries = [
         entry
-        for entry in dedupe_entries_by_hash(list_uploaded_entries())
+        for entry in source_entries
         if not entry_is_fully_indexed(entry)
     ]
     return sorted(entries, key=lambda entry: get_entry_upload_date(entry))
@@ -247,20 +244,24 @@ def analysis_overrides(entries: list[dict]) -> dict[str, dict]:
     return overrides
 
 
-def analyze_pending_uploads() -> list[dict]:
-    pending_entries = pending_upload_entries()
+def analyze_pending_uploads(pending_entries: list[dict]) -> list[dict]:
     if not pending_entries:
         return []
 
+    clear_chroma_client_cache()
     config = build_ingest_config(run_analysis=True)
-    result = ingest_files(
-        file_paths=[
-            str((entry.get("metadata") or {}).get("file_path") or "")
-            for entry in pending_entries
-        ],
-        config=config,
-        metadata_overrides=analysis_overrides(pending_entries),
-    )
+    try:
+        result = ingest_files(
+            file_paths=[
+                str((entry.get("metadata") or {}).get("file_path") or "")
+                for entry in pending_entries
+            ],
+            config=config,
+            metadata_overrides=analysis_overrides(pending_entries),
+        )
+    finally:
+        clear_chroma_client_cache()
+        clear_uploaded_entries_cache()
 
     rows = []
     indexed_keys = set(result.chroma_indexed_keys)
@@ -415,7 +416,7 @@ def render_upload_page() -> None:
     )
     selections, duplicate_in_selection_count = classify_uploaded_files(uploaded_files)
     action_overrides = st.session_state.setdefault("upload_duplicate_actions", {})
-    pending_entries = pending_upload_entries()
+    pending_entries = pending_upload_entries(list_uploaded_entries())
 
     if selections:
         render_selection_table(selections, action_overrides)
@@ -436,6 +437,7 @@ def render_upload_page() -> None:
                         selections=selections,
                         action_overrides=action_overrides,
                     )
+                pending_entries = pending_upload_entries(list_uploaded_entries())
                 st.session_state["upload_store_results"] = results
                 stored_count = sum(
                     1
@@ -459,7 +461,8 @@ def render_upload_page() -> None:
         ):
             try:
                 with st.spinner("Analyzing pending uploads..."):
-                    results = analyze_pending_uploads()
+                    results = analyze_pending_uploads(pending_entries)
+                pending_entries = pending_upload_entries(list_uploaded_entries())
                 st.session_state["upload_analysis_results"] = results
                 indexed_count = sum(1 for row in results if row["status"] == STATUS_INDEXED)
                 if indexed_count:
@@ -475,14 +478,13 @@ def render_upload_page() -> None:
         st.markdown("**Store results**")
         st.dataframe(results_table(stored_results), hide_index=True)
 
-    latest_pending = pending_upload_entries()
     st.markdown("**Pending analysis**")
-    if latest_pending:
+    if pending_entries:
         st.caption(
-            f"{len(latest_pending)} uploaded file(s) are stored in MongoDB but still missing generated descriptions or Chroma indexing."
+            f"{len(pending_entries)} uploaded file(s) are stored in MongoDB but still missing generated descriptions or Chroma indexing."
         )
         st.dataframe(
-            pending_table(latest_pending),
+            pending_table(pending_entries),
             hide_index=True,
         )
     else:

@@ -13,11 +13,22 @@ from ui.config import (
     IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
 )
-from ui.data import entry_has_description, entry_is_fully_indexed
+from ui.data import (
+    delete_uploaded_entry,
+    entry_has_description,
+    entry_is_fully_indexed,
+    is_uploaded_entry,
+    rename_uploaded_entry,
+    uploaded_entry_file_hash,
+)
 from ui.formatting import get_entry_display_fields, get_summary, to_jsonable
+from ui.media import get_thumbnail_data_uri, render_media
 
 
 DETAIL_TRIGGER_KEY_PREFIX = "result_card_detail_trigger_"
+PENDING_DELETE_ENTRY_ID_KEY = "detail_pending_delete_entry_id"
+PENDING_DELETE_FILE_HASH_KEY = "detail_pending_delete_file_hash"
+PENDING_DELETE_FILE_NAME_KEY = "detail_pending_delete_file_name"
 
 
 def get_selected_entry_id() -> str | None:
@@ -27,11 +38,20 @@ def get_selected_entry_id() -> str | None:
     return None
 
 
+def clear_detail_action_state() -> None:
+    st.session_state.pop(PENDING_DELETE_ENTRY_ID_KEY, None)
+    st.session_state.pop(PENDING_DELETE_FILE_HASH_KEY, None)
+    st.session_state.pop(PENDING_DELETE_FILE_NAME_KEY, None)
+
+
 def set_selected_entry_id(entry_id: str) -> None:
+    if get_selected_entry_id() != str(entry_id):
+        clear_detail_action_state()
     st.session_state["selected_entry_id"] = str(entry_id)
 
 
 def clear_selected_entry_id() -> None:
+    clear_detail_action_state()
     st.session_state.pop("selected_entry_id", None)
 
 
@@ -126,24 +146,180 @@ def detail_caption(rank: int | None, score: float | None, fallback: str) -> str:
     return f"Rank {rank} · Relevance score {score:.4f}"
 
 
-def render_detail_media(file_path: str, ext: str) -> None:
-    from ui.media import render_media
-
-    render_media(file_path=file_path, ext=ext)
-
-
-def render_detail_actions(
-    file_path: str,
-    close_label: str,
-) -> None:
-    safe_path = html.escape(file_path or "No path stored.")
+def render_detail_path(file_path: str) -> None:
     st.markdown(
-        f'<div class="detail-path">{safe_path}</div>',
+        f'<div class="detail-path">{html.escape(file_path or "No path stored.")}</div>',
         unsafe_allow_html=True,
     )
-    if st.button(close_label, type="primary"):
+
+
+def render_close_button(entry_id: str, close_label: str) -> None:
+    if st.button(
+        close_label,
+        key=f"detail_close_action_{entry_id}",
+        type="primary",
+        use_container_width=True,
+    ):
         clear_selected_entry_id()
         st.rerun()
+
+
+def sync_renamed_entries(entry_ids: list[str], file_name: str) -> None:
+    entries = st.session_state.get("last_result_entries")
+    if not isinstance(entries, dict):
+        return
+
+    for entry_id in entry_ids:
+        entry = entries.get(str(entry_id))
+        if not isinstance(entry, dict):
+            continue
+        metadata = dict(entry.get("metadata") or {})
+        metadata["file_name"] = file_name
+        entry["metadata"] = metadata
+
+
+def sync_deleted_entries(entry_ids: list[str]) -> None:
+    deleted_ids = {str(entry_id) for entry_id in entry_ids}
+    if not deleted_ids:
+        return
+
+    previous_ids = list(st.session_state.get("last_result_ids", []))
+    previous_scores = list(st.session_state.get("last_result_scores", []))
+    kept_pairs = [
+        (entry_id, previous_scores[index] if index < len(previous_scores) else None)
+        for index, entry_id in enumerate(previous_ids)
+        if entry_id not in deleted_ids
+    ]
+    st.session_state["last_result_ids"] = [entry_id for entry_id, _ in kept_pairs]
+    st.session_state["last_result_scores"] = [score for _, score in kept_pairs]
+    st.session_state["last_result_entries"] = {
+        entry_id: entry
+        for entry_id, entry in (st.session_state.get("last_result_entries") or {}).items()
+        if entry_id not in deleted_ids
+    }
+    update_result_indexes(
+        st.session_state["last_result_ids"],
+        st.session_state["last_result_scores"],
+    )
+
+
+def render_uploaded_management_section(
+    entry_id: str,
+    entry: dict,
+    file_name: str,
+    close_label: str,
+    file_path: str,
+) -> None:
+    if not is_uploaded_entry(entry):
+        render_close_button(entry_id, close_label)
+        render_detail_path(file_path)
+        return
+
+    file_hash = uploaded_entry_file_hash(entry)
+    if not file_hash:
+        render_close_button(entry_id, close_label)
+        render_detail_path(file_path)
+        return
+
+    st.divider()
+    st.markdown("**Manage upload**")
+    st.caption("Display name")
+
+    rename_key = f"uploaded_rename_name_{entry_id}"
+    if rename_key not in st.session_state:
+        st.session_state[rename_key] = file_name
+
+    rename_col, save_col = st.columns([4.6, 1.4], gap="small")
+    with rename_col:
+        st.text_input(
+            "Display name",
+            key=rename_key,
+            label_visibility="collapsed",
+            placeholder="Uploaded file name",
+        )
+    with save_col:
+        rename_submitted = st.button(
+            "Save name",
+            key=f"uploaded_rename_submit_{entry_id}",
+            use_container_width=True,
+        )
+
+    if rename_submitted:
+        try:
+            renamed_entry_ids, cleaned_name = rename_uploaded_entry(
+                file_hash,
+                st.session_state.get(rename_key, ""),
+            )
+        except Exception as exc:
+            st.error("Renaming the uploaded file failed.")
+            st.exception(exc)
+        else:
+            sync_renamed_entries(renamed_entry_ids, cleaned_name)
+            st.session_state[rename_key] = cleaned_name
+            clear_detail_action_state()
+            st.rerun()
+
+    action_col, delete_col = st.columns(2, gap="small")
+    with action_col:
+        render_close_button(entry_id, close_label)
+    with delete_col:
+        if st.button(
+            "Delete upload",
+            key=f"uploaded_delete_prompt_{entry_id}",
+            use_container_width=True,
+        ):
+            st.session_state[PENDING_DELETE_ENTRY_ID_KEY] = str(entry_id)
+            st.session_state[PENDING_DELETE_FILE_HASH_KEY] = file_hash
+            st.session_state[PENDING_DELETE_FILE_NAME_KEY] = file_name
+            st.rerun()
+
+    render_detail_path(file_path)
+
+
+def render_delete_confirm_body(entry_id: str, entry: dict) -> None:
+    _, file_path, file_name, _ = get_entry_display_fields(entry_id, entry)
+    file_hash = uploaded_entry_file_hash(entry)
+    pending_file_name = str(
+        st.session_state.get(PENDING_DELETE_FILE_NAME_KEY) or file_name
+    )
+
+    if not file_hash:
+        clear_detail_action_state()
+        st.warning("Uploaded file details are missing.")
+        return
+
+    st.subheader("Delete upload")
+    st.write(f"Permanently delete `{pending_file_name}`?")
+    st.warning(
+        "This removes the uploaded file from disk and deletes its related MongoDB and Chroma records."
+    )
+    render_detail_path(file_path)
+
+    action_col, delete_col = st.columns(2, gap="small")
+    with action_col:
+        if st.button(
+            "Back to details",
+            key=f"uploaded_delete_cancel_{entry_id}",
+            type="primary",
+            use_container_width=True,
+        ):
+            clear_detail_action_state()
+            st.rerun()
+    with delete_col:
+        if st.button(
+            "Delete permanently",
+            key=f"uploaded_delete_confirm_action_{entry_id}",
+            use_container_width=True,
+        ):
+            try:
+                deleted_entry_ids = delete_uploaded_entry(file_hash)
+            except Exception as exc:
+                st.error("Deleting the uploaded file failed.")
+                st.exception(exc)
+            else:
+                sync_deleted_entries(deleted_entry_ids)
+                clear_selected_entry_id()
+                st.rerun()
 
 
 def render_indexed_detail_body(
@@ -167,7 +343,7 @@ def render_indexed_detail_body(
 
     left, right = st.columns([1.15, 0.85])
     with left:
-        render_detail_media(file_path=file_path, ext=ext)
+        render_media(file_path=file_path, ext=ext)
 
     with right:
         if fully_indexed:
@@ -185,7 +361,13 @@ def render_indexed_detail_body(
             st.caption(
                 "Metadata is stored. Description generation and Chroma indexing have not completed yet."
             )
-        render_detail_actions(file_path=file_path, close_label=close_label)
+        render_uploaded_management_section(
+            entry_id=entry_id,
+            entry=entry,
+            file_name=file_name,
+            close_label=close_label,
+            file_path=file_path,
+        )
 
     with st.expander("Description", expanded=False):
         description = entry.get("description") or {}
@@ -208,17 +390,25 @@ def render_detail_body(
     score: float | None = None,
     close_label: str = "Close details",
 ) -> None:
-    if entry_id and entry:
-        render_indexed_detail_body(
-            entry_id=entry_id,
-            entry=entry,
-            rank=rank,
-            score=score,
-            close_label=close_label,
-        )
+    if not entry_id or not entry:
+        st.warning("Details could not be loaded.")
         return
 
-    st.warning("Details could not be loaded.")
+    file_hash = uploaded_entry_file_hash(entry)
+    if (
+        st.session_state.get(PENDING_DELETE_ENTRY_ID_KEY) == str(entry_id)
+        and st.session_state.get(PENDING_DELETE_FILE_HASH_KEY) == file_hash
+    ):
+        render_delete_confirm_body(entry_id=entry_id, entry=entry)
+        return
+
+    render_indexed_detail_body(
+        entry_id=entry_id,
+        entry=entry,
+        rank=rank,
+        score=score,
+        close_label=close_label,
+    )
 
 
 if hasattr(st, "dialog"):
@@ -286,8 +476,6 @@ def render_result_preview_card(
     card_markup = ""
     if ext in IMAGE_EXTENSIONS and path and path.is_file():
         try:
-            from ui.media import get_thumbnail_data_uri
-
             title = html.escape(file_name)
             preview = get_thumbnail_data_uri(str(path), path.stat().st_mtime_ns)
             overlay_markup = (

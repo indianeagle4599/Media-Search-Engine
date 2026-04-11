@@ -287,5 +287,32 @@ div[data-testid="stForm"] div[data-testid="stHorizontalBlock"] {
   color: rgba(128, 128, 128, 0.98);
   font-size: 0.85rem;
 }
+[class*="st-key-uploaded_rename_submit_"] button,
+[class*="st-key-detail_close_action_"] button,
+[class*="st-key-uploaded_delete_prompt_"] button,
+[class*="st-key-uploaded_delete_cancel_"] button,
+[class*="st-key-uploaded_delete_confirm_action_"] button {
+  min-height: 2.35rem;
+  border-radius: 0.85rem;
+}
+[class*="st-key-uploaded_delete_prompt_"] button,
+[class*="st-key-uploaded_delete_confirm_action_"] button {
+  border: 1px solid rgba(239, 68, 68, 0.42) !important;
+  background: linear-gradient(
+    135deg,
+    rgba(220, 38, 38, 0.96),
+    rgba(185, 28, 28, 0.92)
+  ) !important;
+  color: #ffffff !important;
+}
+[class*="st-key-uploaded_delete_prompt_"] button:hover,
+[class*="st-key-uploaded_delete_confirm_action_"] button:hover {
+  border-color: rgba(248, 113, 113, 0.55) !important;
+  background: linear-gradient(
+    135deg,
+    rgba(239, 68, 68, 0.96),
+    rgba(185, 28, 28, 0.94)
+  ) !important;
+}
 </style>
 """

@@ -5,6 +5,7 @@ from time import perf_counter
 from dotenv import load_dotenv
 import streamlit as st
 
+from ui.chroma_viewer import render_chroma_viewer
 from ui.components import (
     clear_selected_entry_id,
     detail_dialog,
@@ -16,11 +17,13 @@ from ui.components import (
 )
 from ui.config import DEFAULT_TOP_N
 from ui.config import FILTERED_SEARCH_MULTIPLIER, MAX_FILTERED_CANDIDATES
+from ui.data import get_entries, get_query_results
 from ui.filters import (
     active_filters_from_state,
     apply_result_filters,
     filters_are_active,
 )
+from ui.gallery import render_gallery_page
 from ui.history import (
     clear_history,
     coerce_scores,
@@ -28,6 +31,7 @@ from ui.history import (
     load_history,
     save_search,
 )
+from ui.upload import render_upload_page
 
 EMPTY_STATE = (
     "Describe the photo, video, or text you want to find."
@@ -116,8 +120,6 @@ def restore_search_state(item: dict) -> None:
 
 
 def load_saved_result(item: dict) -> tuple[list[str], dict, list[float | None], float]:
-    from ui.data import get_entries
-
     restore_search_state(item)
     ids = [str(entry_id) for entry_id in item.get("ids", [])]
     return ids, get_entries(ids), coerce_scores(item.get("scores")), 0.0
@@ -182,8 +184,6 @@ def render_empty_state() -> None:
 
 
 def search(query: str, top_n: int) -> tuple[list[str], dict, list[float], float]:
-    from ui.data import get_entries, get_query_results
-
     start = perf_counter()
     ids, result = get_query_results(query=query, top_n=top_n)
     entries = get_entries(ids)
@@ -205,20 +205,14 @@ def main() -> None:
     page = render_navbar()
 
     if page == "ChromaDB":
-        from ui.chroma_viewer import render_chroma_viewer
-
         render_chroma_viewer()
         return
 
     if page == "Upload":
-        from ui.upload import render_upload_page
-
         render_upload_page()
         return
 
     if page == "Gallery":
-        from ui.gallery import render_gallery_page
-
         render_gallery_page()
         return
 

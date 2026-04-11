@@ -13,7 +13,6 @@ from ui.components import (
 )
 from ui.config import IMAGE_EXTENSIONS
 from ui.data import (
-    dedupe_entries_by_hash,
     entry_is_fully_indexed,
     get_entries,
     get_entry_creation_date,
@@ -71,10 +70,7 @@ def sort_gallery_records(records: list[dict], sort_by: str) -> list[dict]:
 
 
 def get_gallery_records(limit: int = 48, sort_by: str = DEFAULT_SORT) -> list[dict]:
-    records = [
-        build_gallery_record(entry)
-        for entry in dedupe_entries_by_hash(list_uploaded_entries())
-    ]
+    records = [build_gallery_record(entry) for entry in list_uploaded_entries()]
     records = [record for record in records if record.get("ext") in IMAGE_EXTENSIONS]
     records = sort_gallery_records(records, sort_by)
     return records[: int(limit)]
@@ -152,7 +148,7 @@ def render_gallery_page() -> None:
     with sort_col:
         sort_by = st.selectbox("Sort by", SORT_OPTIONS, index=0)
     with limit_col:
-        limit = st.selectbox("Images to show", GALLERY_LIMIT_OPTIONS, index=1)
+        limit = st.selectbox("Images to show", GALLERY_LIMIT_OPTIONS, index=0)
 
     records = get_gallery_records(limit=int(limit), sort_by=sort_by)
     render_gallery_grid(records)

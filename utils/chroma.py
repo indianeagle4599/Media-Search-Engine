@@ -1006,43 +1006,46 @@ def query_all_collections(
             else chroma_client.get_collection(col_name)
         )
 
-        if semantic_query_specs:
-            lexical_query_results_dict = lexical_search_collection(
-                collection=collection,
-                query_specs=semantic_query_specs,
-                n_results=min(n_results * 50, 500),
-            )
-            if lexical_query_results_dict:
-                for key in combined_query_results:
-                    combined_query_results[key].extend(
-                        lexical_query_results_dict.get(key, [])
-                    )
+        try:
+            if semantic_query_specs:
+                lexical_query_results_dict = lexical_search_collection(
+                    collection=collection,
+                    query_specs=semantic_query_specs,
+                    n_results=min(n_results * 50, 500),
+                )
+                if lexical_query_results_dict:
+                    for key in combined_query_results:
+                        combined_query_results[key].extend(
+                            lexical_query_results_dict.get(key, [])
+                        )
 
-        if col_name == "context_narrative" and chronological_query_specs:
-            chrono_query_results_dict = chronological_search_collection(
-                collection=collection,
-                query_specs=chronological_query_specs,
-                date_field="master_date",
-                n_results=min(n_results * 50, 500),
-            )
-            if chrono_query_results_dict:
-                for key in combined_query_results:
-                    combined_query_results[key].extend(
-                        chrono_query_results_dict.get(key, [])
-                    )
+            if col_name == "context_narrative" and chronological_query_specs:
+                chrono_query_results_dict = chronological_search_collection(
+                    collection=collection,
+                    query_specs=chronological_query_specs,
+                    date_field="master_date",
+                    n_results=min(n_results * 50, 500),
+                )
+                if chrono_query_results_dict:
+                    for key in combined_query_results:
+                        combined_query_results[key].extend(
+                            chrono_query_results_dict.get(key, [])
+                        )
 
-        if semantic_query_specs and collection_embedding_key:
-            semantic_query_results_dict = semantic_search_collection(
-                collection=collection,
-                query_specs=semantic_query_specs,
-                embedding_key=collection_embedding_key,
-                n_results=min(n_results * 10, 500),
-            )
-            if semantic_query_results_dict:
-                for key in combined_query_results:
-                    combined_query_results[key].extend(
-                        semantic_query_results_dict.get(key, [])
-                    )
+            if semantic_query_specs and collection_embedding_key:
+                semantic_query_results_dict = semantic_search_collection(
+                    collection=collection,
+                    query_specs=semantic_query_specs,
+                    embedding_key=collection_embedding_key,
+                    n_results=min(n_results * 10, 500),
+                )
+                if semantic_query_results_dict:
+                    for key in combined_query_results:
+                        combined_query_results[key].extend(
+                            semantic_query_results_dict.get(key, [])
+                        )
+        except Exception as exc:
+            print(f"Skipping Chroma collection '{col_name}' after query error: {exc}")
 
     combined_query_results = pd.DataFrame(combined_query_results)
 

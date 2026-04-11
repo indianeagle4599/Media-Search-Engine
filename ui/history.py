@@ -7,16 +7,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ui.config import SEARCH_HISTORY_LIMIT
+from utils.mongo import get_search_history_collection
 
 
 def history_user() -> str:
     return os.getenv("MEDIA_SEARCH_HISTORY_USER", "local")
-
-
-def get_history_collection():
-    from ui.data import get_search_history_collection
-
-    return get_search_history_collection()
 
 
 def search_key(item: dict) -> str:
@@ -44,7 +39,7 @@ def normalize_item(item: dict) -> dict:
 def load_history() -> list[dict]:
     try:
         cursor = (
-            get_history_collection()
+            get_search_history_collection()
             .find({"history_user": history_user()})
             .sort("created_at", -1)
             .limit(SEARCH_HISTORY_LIMIT)
@@ -55,7 +50,7 @@ def load_history() -> list[dict]:
 
 
 def trim_history() -> None:
-    collection = get_history_collection()
+    collection = get_search_history_collection()
     old_ids = [
         item["_id"]
         for item in collection.find(
@@ -71,7 +66,7 @@ def trim_history() -> None:
 
 def clear_history() -> None:
     try:
-        get_history_collection().delete_many({"history_user": history_user()})
+        get_search_history_collection().delete_many({"history_user": history_user()})
     except Exception:
         pass
 
@@ -98,7 +93,7 @@ def save_search(
     item["search_key"] = search_key(item)
 
     try:
-        get_history_collection().update_one(
+        get_search_history_collection().update_one(
             {
                 "history_user": item["history_user"],
                 "search_key": item["search_key"],
