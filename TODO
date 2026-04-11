@@ -3,7 +3,7 @@ Next Up
 [X] Check options for batch predictions with vlm
 [X] Simplify duplicate uploads UI to become a table with checkbox instead for easier management
 [ ] Use volatile proxy and image converters for unsupported image types
-[ ] Apply multi-processing in embedding generation during indexing and querying
+[X] Apply multi-processing in embedding generation during indexing and querying
 [ ] Add search relevance thresholds to filter and display only good query matches
 
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
@@ -26,11 +26,10 @@ Tasks
     [ ] Video metadata extraction and indexing support
 [ ] Media indexer improvements
     [ ] VLM
-        [X] Check options for batch predictions
         [ ] Explore lighter models
     [ ] Use pydantic for maintaining standard schema
     [ ] ChromaDB
-        [ ] Explore optimizations like multi-processing, hybrid-search, caching, etc.
+        [X] Explore optimizations like multi-processing, hybrid-search, caching, etc.
         [ ] Create retrieval evaluation setup
             [ ] Create a random data downloader
     [ ] Add RAG-based search features.

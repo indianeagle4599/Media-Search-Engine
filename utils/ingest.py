@@ -12,10 +12,14 @@ from google import genai
 from utils.chroma import populate_db
 from utils.io import index_folder, index_paths
 from utils.mongo import check_if_exists, upsert_dict_objects
-from utils.prompt import describe_image_batch
+from utils.prompt import (
+    build_batch_request,
+    describe_prepared_batch,
+    prepare_batch_entry,
+)
 
 
-DEFAULT_DESCRIPTION_RIGOR = "medium"
+DEFAULT_DESCRIPTION_RIGOR = "very low"
 DEFAULT_DESCRIPTION_MAX_INLINE_BYTES = 18 * 1024 * 1024
 DEFAULT_ANALYSIS_IMAGE_MAX_WIDTH = 1600
 DEFAULT_ANALYSIS_IMAGE_MAX_HEIGHT = 1600
@@ -217,20 +221,6 @@ def description_batch_size(config: IngestConfig) -> int:
     return DESCRIPTION_BATCH_SIZE_BY_RIGOR[rigor]
 
 
-def estimate_description_bytes(metadata: dict, config: IngestConfig) -> int:
-    if config.use_dummy_descriptions:
-        return 0
-
-    file_path = str(metadata.get("file_path") or "")
-    if not file_path:
-        return 0
-
-    try:
-        return os.path.getsize(file_path)
-    except OSError:
-        return 0
-
-
 def iter_missing_batches(
     descriptions: dict,
     missing_keys: list[str],
@@ -239,41 +229,95 @@ def iter_missing_batches(
     max_batch_size = description_batch_size(config)
     max_inline_bytes = max(1, int(config.description_max_inline_bytes or 1))
     batch_keys = []
-    batch_bytes = 0
+    batch_request = None
+
+    def flush_batch():
+        nonlocal batch_keys, batch_request
+        if not batch_keys:
+            return None
+        flushed_batch = {
+            "keys": batch_keys,
+            "batch_request": batch_request,
+        }
+        batch_keys = []
+        batch_request = None
+        return flushed_batch
 
     for missing_key in missing_keys:
-        item_bytes = estimate_description_bytes(
+        prepared_entry = prepare_batch_entry(
+            missing_key,
             descriptions[missing_key]["metadata"],
-            config,
+            config.use_dummy_descriptions,
+            analysis_image_max_width=config.analysis_image_max_width,
+            analysis_image_max_height=config.analysis_image_max_height,
         )
-        if batch_keys and (
-            len(batch_keys) >= max_batch_size
-            or (item_bytes and batch_bytes + item_bytes > max_inline_bytes)
-        ):
-            yield batch_keys
-            batch_keys = []
-            batch_bytes = 0
 
-        batch_keys.append(missing_key)
-        batch_bytes += item_bytes
+        if prepared_entry is None:
+            flushed_batch = flush_batch()
+            if flushed_batch:
+                yield flushed_batch
+            yield {
+                "keys": [missing_key],
+                "batch_request": None,
+                "error_reason": "Media item could not be prepared for Gemini analysis.",
+            }
+            continue
+
+        candidate_entries = (batch_request["entries"] if batch_request else []) + [
+            prepared_entry
+        ]
+        candidate_request = build_batch_request(
+            candidate_entries,
+            use_dummy_descriptions=config.use_dummy_descriptions,
+        )
+
+        if (
+            not config.use_dummy_descriptions
+            and not batch_keys
+            and candidate_request["request_bytes"] > max_inline_bytes
+        ):
+            yield {
+                "keys": [missing_key],
+                "batch_request": None,
+                "error_reason": (
+                    "Prepared Gemini inline request exceeds the configured byte limit."
+                ),
+            }
+            continue
+
+        if (
+            batch_keys
+            and candidate_request["request_bytes"] > max_inline_bytes
+        ):
+            yield flush_batch()
+            batch_request = build_batch_request(
+                [prepared_entry],
+                use_dummy_descriptions=config.use_dummy_descriptions,
+            )
+            if (
+                not config.use_dummy_descriptions
+                and batch_request["request_bytes"] > max_inline_bytes
+            ):
+                batch_request = None
+                yield {
+                    "keys": [missing_key],
+                    "batch_request": None,
+                    "error_reason": (
+                        "Prepared Gemini inline request exceeds the configured byte limit."
+                    ),
+                }
+                continue
+            batch_keys = [missing_key]
+        else:
+            batch_keys.append(missing_key)
+            batch_request = candidate_request
 
         if len(batch_keys) >= max_batch_size:
-            yield batch_keys
-            batch_keys = []
-            batch_bytes = 0
+            yield flush_batch()
 
-    if batch_keys:
-        yield batch_keys
-
-
-def build_batch_entries(descriptions: dict, batch_keys: list[str]) -> list[dict]:
-    return [
-        {
-            "entry_id": missing_key,
-            "metadata": descriptions[missing_key]["metadata"],
-        }
-        for missing_key in batch_keys
-    ]
+    flushed_batch = flush_batch()
+    if flushed_batch:
+        yield flushed_batch
 
 
 def record_description_failures(
@@ -354,7 +398,7 @@ def mark_rate_limited(
         }
 
     warnings.warn(
-        "Received Gemini 'APIError' while running 'describe_image_batch': "
+        "Received Gemini 'APIError' while running a description batch: "
         "Quota reached. Stopping image analysis.",
     )
     return rate_limited_keys
@@ -375,14 +419,24 @@ def populate_missing(
     error_details: dict[str, dict[str, str]] = {}
 
     processed_count = 0
-    for batch_keys in iter_missing_batches(descriptions, missing_keys, config):
+    for batch_info in iter_missing_batches(descriptions, missing_keys, config):
+        batch_keys = batch_info["keys"]
+        error_reason = batch_info.get("error_reason")
+        if error_reason:
+            record_description_failures(
+                failed_keys,
+                error_details,
+                batch_keys,
+                error_reason,
+            )
+            processed_count += len(batch_keys)
+            continue
+
         try:
-            batch_output = describe_image_batch(
+            batch_output = describe_prepared_batch(
                 client=config.genai_client,
-                batch_entries=build_batch_entries(descriptions, batch_keys),
+                batch_request=batch_info["batch_request"],
                 use_dummy_descriptions=config.use_dummy_descriptions,
-                analysis_image_max_width=config.analysis_image_max_width,
-                analysis_image_max_height=config.analysis_image_max_height,
             )
         except genai.errors.APIError as exc:
             if str(exc.code) == "429":
@@ -392,9 +446,7 @@ def populate_missing(
                     error_details,
                 )
                 break
-            print(
-                "Received Gemini 'APIError' while running 'describe_image_batch':", exc
-            )
+            print("Received Gemini 'APIError' while running a description batch:", exc)
             record_description_failures(
                 failed_keys,
                 error_details,
@@ -402,7 +454,7 @@ def populate_missing(
                 str(exc),
             )
         except Exception as exc:
-            print("Reached an Exception while running 'describe_image_batch':", exc)
+            print("Reached an Exception while running a description batch:", exc)
             record_description_failures(
                 failed_keys,
                 error_details,

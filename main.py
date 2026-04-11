@@ -1,16 +1,16 @@
 """CLI entrypoint for ingesting the media library into MongoDB and ChromaDB."""
 
-import os
-
-import pymongo
+import os, pymongo
 from dotenv import load_dotenv
 
-from utils.chroma import get_chroma_client
+from utils.chroma import get_chroma_client, populate_db
 from utils.ingest import (
     build_ingest_config_from_env,
     ingest_folder,
 )
+
 DEFAULT_IMAGES_ROOT = "images_root/test_folder"
+REPOPULATE_FLAG = "MEDIA_REPOPULATE_CHROMA"
 
 
 def build_ingest_config():
@@ -24,8 +24,28 @@ def build_ingest_config():
     )
 
 
+def repopulate_chroma_from_mongo() -> None:
+    config = build_ingest_config()
+    entries = {}
+    for document in config.mongo_collection.find({}):
+        entry_id = str(document.pop("_id"))
+        entries[entry_id] = document
+
+    populate_db(
+        entries=entries,
+        chroma_client=config.chroma_client,
+        overwrite=True,
+        verbose=config.verbose,
+    )
+    print(f"Repopulated Chroma from Mongo entries: {len(entries)}")
+
+
 def main() -> None:
     load_dotenv()
+    if os.getenv(REPOPULATE_FLAG, "").strip().lower() in {"1", "true", "yes"}:
+        repopulate_chroma_from_mongo()
+        return
+
     root_path = os.getenv("MEDIA_INDEX_ROOT", DEFAULT_IMAGES_ROOT)
     result = ingest_folder(root_path=root_path, config=build_ingest_config())
 
