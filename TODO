@@ -1,9 +1,6 @@
 Next Up
 
-[X] Check options for batch predictions with vlm
-[X] Simplify duplicate uploads UI to become a table with checkbox instead for easier management
-[ ] Use volatile proxy and image converters for unsupported image types
-[X] Apply multi-processing in embedding generation during indexing and querying
+[X] Use volatile proxy and image converters for unsupported image types
 [ ] Add search relevance thresholds to filter and display only good query matches
 
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
@@ -13,15 +10,14 @@ Tasks
 
 [ ] File tracker improvements
     [ ] Simplify metadata schema further - condense and retain fewer metadata fields (do after adding other file support)
-    [ ] Normalize and convert files and create a structured local file manager
-        [ ] Create a simple, temp-file type converter (a volatile proxy), to pass directly unsupported images to the LLM.
-        [ ] Allow analysis support for avif and other image file types.
-        [ ] File renaming as necessary
+    [X] Normalize and convert files and create a structured local file manager
+        [X] Create a simple, temp-file type converter (a volatile proxy), to pass directly unsupported images to the LLM.
+        [X] Allow analysis support for avif and other image file types.
     [ ] Effectively extract metadata
         [ ] Improve GPS metadata extraction in JPEGs
             [ ] Create one clean and normalised object
             [ ] Get location names and/or geocodes
-        [ ] Support PNG and HEIF metadata extraction
+        [X] Support PNG and HEIF metadata extraction
         [ ] Support metadata extraction for other file types like TIF, SVG, etc.
     [ ] Video metadata extraction and indexing support
 [ ] Media indexer improvements
@@ -29,7 +25,6 @@ Tasks
         [ ] Explore lighter models
     [ ] Use pydantic for maintaining standard schema
     [ ] ChromaDB
-        [X] Explore optimizations like multi-processing, hybrid-search, caching, etc.
         [ ] Create retrieval evaluation setup
             [ ] Create a random data downloader
     [ ] Add RAG-based search features.
@@ -41,6 +36,5 @@ Tasks
     [ ] Add actions to open/copy original file paths from the detail modal.
     [ ] Add a Chat option as relevant.
 [ ] Good SDE practices
-    [X] Leverage branches for feature development.
     [ ] Setup Pytest and design test cases for various functions.
     [ ] Add docstrings

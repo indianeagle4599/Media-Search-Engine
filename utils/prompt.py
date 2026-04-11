@@ -79,14 +79,13 @@ def prepare_batch_entry(
     entry_id = str(entry_id or "")
     metadata = metadata or {}
     filename = metadata.get("file_name") or entry_id
-    if (
-        metadata.get("media_type") != "image"
-        or not metadata.get("is_compat")
-        or not metadata.get("file_path")
-    ):
+    if metadata.get("media_type") != "image":
         warnings.warn(
             f"Skipping [{filename}] as '{metadata.get('media_type')}/{metadata.get('ext')}' is not supported."
         )
+        return None
+    if not metadata.get("file_path"):
+        warnings.warn(f"Skipping [{filename}] because no file path is available.")
         return None
 
     prepared = {"entry_id": entry_id, "metadata": metadata}

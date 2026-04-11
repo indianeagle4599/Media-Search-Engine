@@ -10,6 +10,7 @@ SEARCH_HISTORY_COLLECTION = "media_search_history"
 UPLOAD_ROOT = "images_root/uploads"
 
 IMAGE_EXTENSIONS = {
+    "avif",
     "jpg",
     "jpeg",
     "png",

@@ -384,6 +384,19 @@ def render_selection_table(
         st.caption(
             "Duplicates are ignored by default. Tick `re_upload` only when you want to replace the old searchable record with a fresh metadata-first upload."
         )
+        duplicate_hashes = [
+            str(row["file_hash"] or "")
+            for row in rows
+            if row["status"] == "duplicate" and row.get("file_hash")
+        ]
+        if duplicate_hashes and st.button(
+            "Select all duplicates for re-upload",
+            key="upload_select_all_duplicates",
+        ):
+            for file_hash in duplicate_hashes:
+                action_overrides[file_hash] = ACTION_REUPLOAD
+            st.rerun()
+        rows = selection_rows(selections, action_overrides)
         edited_rows = st.data_editor(
             rows,
             hide_index=True,
