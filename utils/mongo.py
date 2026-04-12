@@ -8,6 +8,7 @@ import os, pymongo
 from functools import lru_cache
 
 DEFAULT_SEARCH_HISTORY_COLLECTION = "media_search_history"
+DEFAULT_SEARCH_FEEDBACK_COLLECTION = "media_search_feedback"
 
 
 def get_required_env(name: str) -> str:
@@ -41,6 +42,18 @@ def get_search_history_collection(
     )
     collection.create_index([("history_user", 1), ("created_at", -1)])
     collection.create_index([("history_user", 1), ("search_key", 1)], unique=True)
+    return collection
+
+
+@lru_cache(maxsize=1)
+def get_search_feedback_collection(
+    default_name: str = DEFAULT_SEARCH_FEEDBACK_COLLECTION,
+) -> pymongo.collection.Collection:
+    collection = get_mongo_collection(
+        os.getenv("MEDIA_SEARCH_FEEDBACK_COLLECTION", default_name)
+    )
+    collection.create_index([("history_user", 1), ("created_at", -1)])
+    collection.create_index([("history_user", 1), ("query", 1), ("entry_id", 1)])
     return collection
 
 

@@ -1,4 +1,8 @@
-"""UI configuration constants."""
+"""
+config.py
+
+Shared UI constants and CSS for the Streamlit media search interface.
+"""
 
 DEFAULT_TOP_N = 10
 GRID_COLUMNS = 4
@@ -239,14 +243,13 @@ div[data-testid="stForm"] div[data-testid="stHorizontalBlock"] {
   margin: 0.4rem 0 0.35rem;
   background: rgba(255, 255, 255, 0.14);
 }
+.result-card__overlay-meta {
+  font-size: 0.76rem;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.9);
+}
 .result-card:hover .result-card__rank {
   opacity: 1;
-}
-.result-card__caption {
-  padding: 0.5rem 0.2rem 0.15rem;
-  color: rgba(128, 128, 128, 0.98);
-  font-size: 0.8rem;
-  line-height: 1.35;
 }
 .gallery-card__meta {
   display: grid;

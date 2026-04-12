@@ -21,6 +21,11 @@ DATE_KEYS = (
 def active_filters_from_state(state: dict) -> dict:
     return {
         "media_type": state.get("filter_media_type", "All"),
+        "result_sources": sorted(
+            str(source_id or "").strip()
+            for source_id in state.get("filter_result_sources", [])
+            if str(source_id or "").strip()
+        ),
         "extensions": sorted(
             ext.lower().lstrip(".") for ext in state.get("filter_extensions", [])
         ),
@@ -34,6 +39,7 @@ def filters_are_active(filters: dict) -> bool:
     return any(
         [
             filters.get("media_type") != "All",
+            bool(filters.get("result_sources")),
             bool(filters.get("extensions")),
             float(filters.get("min_score") or 0) > 0,
             bool(filters.get("date_from")),
@@ -82,13 +88,23 @@ def entry_date(entry: dict) -> date | None:
     return None
 
 
-def entry_matches_filters(entry: dict, score: float | None, filters: dict) -> bool:
+def entry_matches_filters(
+    entry: dict,
+    score: float | None,
+    filters: dict,
+    result_item: dict | None = None,
+) -> bool:
     _, _, _, ext = get_entry_display_fields("", entry)
     media_type = filters.get("media_type", "All")
     if media_type == "Images" and ext not in IMAGE_EXTENSIONS:
         return False
     if media_type == "Videos" and ext not in VIDEO_EXTENSIONS:
         return False
+    result_sources = filters.get("result_sources") or []
+    if result_sources:
+        item_sources = set((result_item or {}).get("source_ids") or [])
+        if not item_sources.intersection(result_sources):
+            return False
     if filters.get("extensions") and ext not in filters["extensions"]:
         return False
     min_score = float(filters.get("min_score") or 0)
@@ -112,20 +128,27 @@ def apply_result_filters(
     ids: list[str],
     entries: dict,
     scores: list[float],
+    result_items_by_id: dict[str, dict],
     filters: dict,
     limit: int,
-) -> tuple[list[str], list[float | None]]:
+) -> tuple[list[str], list[float | None], list[dict]]:
     filtered_ids = []
     filtered_scores = []
+    filtered_items = []
 
     for index, entry_id in enumerate(ids):
         entry = entries.get(entry_id)
         score = scores[index] if index < len(scores) else None
-        if not entry or not entry_matches_filters(entry, score, filters):
+        result_item = result_items_by_id.get(entry_id) if result_items_by_id else None
+        if not entry or not entry_matches_filters(
+            entry, score, filters, result_item=result_item
+        ):
             continue
         filtered_ids.append(entry_id)
         filtered_scores.append(score)
+        if result_item:
+            filtered_items.append(result_item)
         if len(filtered_ids) >= limit:
             break
 
-    return filtered_ids, filtered_scores
+    return filtered_ids, filtered_scores, filtered_items

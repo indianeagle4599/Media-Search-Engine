@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ui.config import SEARCH_HISTORY_LIMIT
-from utils.mongo import get_search_history_collection
+from utils.mongo import get_search_feedback_collection, get_search_history_collection
 
 
 def history_user() -> str:
@@ -18,6 +18,8 @@ def search_key(item: dict) -> str:
     payload = {
         "query": item.get("query"),
         "filters": item.get("filters"),
+        "search_options": item.get("search_options"),
+        "debug_enabled": item.get("debug_enabled"),
         "ids": item.get("ids"),
     }
     serialized = json.dumps(payload, sort_keys=True, default=str)
@@ -75,6 +77,8 @@ def save_search(
     query: str,
     top_n: int,
     filters: dict,
+    search_options: dict,
+    debug_enabled: bool,
     ids: list[str],
     scores: list[float | None],
 ) -> None:
@@ -87,6 +91,8 @@ def save_search(
         "query": query,
         "top_n": top_n,
         "filters": filters,
+        "search_options": search_options or {},
+        "debug_enabled": bool(debug_enabled),
         "ids": [str(entry_id) for entry_id in ids],
         "scores": [None if score is None else float(score) for score in scores],
     }
@@ -126,3 +132,41 @@ def coerce_scores(value: Any) -> list[float | None]:
         except (TypeError, ValueError):
             continue
     return scores
+
+
+def save_feedback(
+    *,
+    query: str,
+    entry_id: str,
+    feedback: str,
+    rank: int | None,
+    score: float | None,
+    search_options: dict | None,
+    search_plan: dict | None,
+    source_ids: list[str] | None,
+    contributions: list[dict] | None,
+) -> None:
+    cleaned_query = str(query or "").strip()
+    cleaned_entry_id = str(entry_id or "").strip()
+    cleaned_feedback = str(feedback or "").strip().lower()
+    if not cleaned_query or not cleaned_entry_id or not cleaned_feedback:
+        return
+
+    item = {
+        "history_user": history_user(),
+        "created_at": datetime.now(timezone.utc),
+        "query": cleaned_query,
+        "entry_id": cleaned_entry_id,
+        "feedback": cleaned_feedback,
+        "rank": None if rank is None else int(rank),
+        "score": None if score is None else float(score),
+        "search_options": search_options or {},
+        "search_plan": search_plan or {},
+        "source_ids": [str(source_id) for source_id in (source_ids or [])],
+        "contributions": contributions or [],
+    }
+
+    try:
+        get_search_feedback_collection().insert_one(item)
+    except Exception:
+        pass

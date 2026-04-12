@@ -1,141 +1,35 @@
 """
 chroma.py
 
-Contains utilities to create, update and use a chromadb for storing and querying from the descriptions of all images.
+ChromaDB storage, embedding, indexing, and backend query helpers for media search.
 """
 
-import chromadb, json, os, re, multiprocessing as mp
-from datetime import datetime
-from chromadb.utils.batch_utils import create_batches
+import json, os, multiprocessing as mp
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-import pandas as pd
+import chromadb
+from chromadb.utils.batch_utils import create_batches
 
 from utils.date import (
     build_date_where_clause,
     count_mask_specificity,
     date_dict_to_ts,
-    extract_date_filter_from_query,
+)
+from utils.retrieval import (
+    SearchManifest,
+    build_candidate_row,
+    build_query_response,
+    build_query_specs,
+    make_trace_logs,
+    normalize_query_text,
+    summarize_source_debug,
+    tokenize_document,
+    trace_line,
+    resolve_runtime_plan,
 )
 
-STOPWORDS = set(
-    [
-        "the",
-        "is",
-        "in",
-        "and",
-        "to",
-        "of",
-        "a",
-        "that",
-        "it",
-        "with",
-        "as",
-        "for",
-        "was",
-        "on",
-        "by",
-        "this",
-        "are",
-        "be",
-        "or",
-        "from",
-    ]
-)
 
-field_type_map = {
-    # Sentence-like
-    "sentence": [
-        "summary",
-        "detailed_description",
-        "ocr_text",
-        "miscellaneous",
-        "event",
-        "analysis",
-        "metadata_relevance",
-        "other_details",
-    ],
-    # List-like
-    "list": ["objects", "vibe"],
-    # Word-like
-    "word": ["background", "primary_category", "intent", "composition"],
-    # Absolute (non-semantic)
-    "absolute": ["estimated_date"],
-}
-field_type_rev_map = {v_i: k for k, v in field_type_map.items() for v_i in v}
-
-collection_dict = {
-    "content_narrative": [
-        "summary",
-        "detailed_description",
-        "miscellaneous",
-        "background",
-        "objects",
-    ],
-    "context_narrative": ["event", "analysis", "other_details", "vibe"],
-    "lexical_keywords": [
-        "primary_category",
-        "intent",
-        "vibe",
-        "composition",
-        "background",
-        "objects",
-    ],
-    "ocr_content": ["ocr_text"],
-    "other_data": ["metadata_relevance"],
-}
-field_weight_dict = {
-    # semantic search weights
-    "content_narrative": 1.0,
-    "context_narrative": 1.0,
-    "lexical_keywords": 0.7,
-    "ocr_content": 0.4,
-    "other_data": 0.1,
-    # lexical search weights
-    "content_narrative_lexical": 0.8,
-    "context_narrative_lexical": 0.8,
-    "lexical_keywords_lexical": 1.0,
-    "ocr_content_lexical": 0.9,
-    "other_data_lexical": 0.5,
-    # chronological search weights
-    "context_narrative_chrono": 1.0,
-}
-
-collection_type_map = {
-    # Bigger, more narrative, contextual fields that may benefit from a more powerful embedding model
-    "sentence": ["content_narrative", "context_narrative", "ocr_content"],
-    # Smaller, more discrete fields that may be well-handled by a lighter embedding model
-    # and a hybrid search strategy that combines lexical and semantic search
-    "word": ["lexical_keywords", "other_data"],
-    # Absolute (non-semantic)
-    "absolute": [
-        "estimated_date",
-        "master_date",
-        "creation_date",
-        "modification_date",
-        "date_reliability",
-        "index_date",
-        "estimated_ts",
-        "master_ts",
-        "creation_ts",
-        "modification_ts",
-        "index_ts",
-    ],
-}
-collection_type_rev_map = {v_i: k for k, v in collection_type_map.items() for v_i in v}
-
-default_embedding_key = "ollama_all_minilm_l6_v2"
-sentence_embedding_key = "ollama_mxbai_embed_large"
-embedding_model_map = {
-    default_embedding_key: "all-minilm:l6-v2",
-    sentence_embedding_key: "mxbai-embed-large",
-}
-collection_embedding_key_map = {
-    "sentence": sentence_embedding_key,
-    "list": default_embedding_key,
-    "word": default_embedding_key,
-}
 process_embedding_function_cache = {}
 
 DEFAULT_EMBEDDING_PROCESS_COUNT = min(4, os.cpu_count() or 1)
@@ -144,37 +38,34 @@ DEFAULT_EMBEDDING_CHUNK_COUNT_PER_PROCESS = 2
 DEFAULT_OLLAMA_KEEP_ALIVE = "2m"
 
 
-def normalize_query_text(query_text: str):
-    if isinstance(query_text, list):
-        return [normalize_query_text(q) for q in query_text]
-    elif isinstance(query_text, str):
-        return query_text.strip().lower()
+def get_embedding_config_by_key(embedding_key: str) -> dict | None:
+    for config in SearchManifest.EMBEDDINGS.values():
+        if config["key"] == embedding_key:
+            return config
+    return None
 
 
-def tokenize_document(document: str):
-    text = document.lower().replace("\n", " ")
-    text = re.sub(r"[^a-z0-9\s]+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    tokens = [t for t in text.split() if len(t) > 1 and t not in STOPWORDS]
-    token_metadata = {
-        "token_string": " ".join(tokens),
-        "token_count": len(tokens),
-    }
-    if tokens:
-        token_metadata["tokens"] = tokens
-    return token_metadata
+def get_embedding_key_for_family(embedding_family: str | None) -> str | None:
+    if not embedding_family:
+        return None
+    config = SearchManifest.EMBEDDINGS.get(embedding_family)
+    if not config:
+        return None
+    return config["key"]
 
 
 def get_embedding_function(embedding_key: str):
-    model_name = embedding_model_map.get(embedding_key)
-    if model_name is None:
+    embedding_config = get_embedding_config_by_key(embedding_key)
+    if embedding_config is None:
         raise KeyError(f"Unknown embedding key: {embedding_key}")
 
     embedding_function = process_embedding_function_cache.get(embedding_key)
     if embedding_function is not None:
         return embedding_function
 
-    embedding_function = OllamaKeepAliveEmbeddingFunction(model_name=model_name)
+    embedding_function = OllamaKeepAliveEmbeddingFunction(
+        model_name=embedding_config["model_name"]
+    )
     process_embedding_function_cache[embedding_key] = embedding_function
     return embedding_function
 
@@ -244,6 +135,7 @@ class OllamaKeepAliveEmbeddingFunction:
                 f"Failed to reach Ollama at {self.base_url}: {exc}"
             ) from exc
 
+
 def resolve_embedding_process_count(process_count: int | None = None) -> int:
     if process_count is not None:
         return max(1, int(process_count))
@@ -280,6 +172,7 @@ def resolve_embedding_batch_size(document_count: int, process_count: int) -> int
     divisor = max(1, process_count * DEFAULT_EMBEDDING_CHUNK_COUNT_PER_PROCESS)
     return max(1, (document_count + divisor - 1) // divisor)
 
+
 def normalize_embedding_batch(embeddings):
     if hasattr(embeddings, "tolist"):
         embeddings = embeddings.tolist()
@@ -294,6 +187,7 @@ def embed_documents_with_function(
 ) -> list[list[float]]:
     embedding_function = get_embedding_function(embedding_key)
     return normalize_embedding_batch(embedding_function(documents))
+
 
 def generate_embeddings_for_key(
     documents: list[str],
@@ -318,25 +212,21 @@ def generate_embeddings_for_key(
         return embed_documents_with_function(documents, embedding_key)
 
     pool_size = min(process_count, len(document_batches))
-    try:
-        with mp.get_context("spawn").Pool(processes=pool_size) as pool:
-            embedding_batches = pool.starmap(
+    if pool_size <= 1:
+        return embed_documents_with_function(documents, embedding_key)
+
+    with mp.get_context("spawn").Pool(pool_size) as pool:
+        try:
+            embedded_batches = pool.starmap(
                 embed_documents_with_function,
                 [(batch, embedding_key) for batch in document_batches],
             )
-    except (
-        AssertionError,
-        AttributeError,
-        OSError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-    ):
-        return embed_documents_with_function(documents, embedding_key)
+        except Exception:
+            return embed_documents_with_function(documents, embedding_key)
 
     embeddings = []
-    for embedding_batch in embedding_batches:
-        embeddings.extend(embedding_batch)
+    for embedded_batch in embedded_batches:
+        embeddings.extend(normalize_embedding_batch(embedded_batch))
     return embeddings
 
 
@@ -350,11 +240,7 @@ def get_chroma_client(
     if host:
         port = int(port or os.getenv("CHROMA_PORT") or 8000)
         if ssl is None:
-            ssl = os.getenv("CHROMA_SSL", "").strip().lower() in {
-                "1",
-                "true",
-                "yes",
-            }
+            ssl = os.getenv("CHROMA_SSL", "").strip().lower() in {"1", "true", "yes"}
         return chromadb.HttpClient(host=host, port=port, ssl=ssl)
 
     path = path or os.getenv("CHROMA_URL")
@@ -362,55 +248,6 @@ def get_chroma_client(
         raise RuntimeError("Set CHROMA_URL or CHROMA_HOST/CHROMA_SERVER_HOST.")
 
     return chromadb.PersistentClient(path=path)
-
-
-def prep_dict_for_upsert(field_dict: dict):
-    ids = []
-    documents = []
-    for key, val in field_dict.items():
-        if not val:
-            continue
-
-        if isinstance(val, list):
-            for i, v in enumerate(val):
-                if v:
-                    ids.append(f"{key}_item_{i+1}")
-                    documents.append(str(v))
-
-        elif isinstance(val, dict):
-            for k, v in val.items():
-                if v:
-                    ids.append(f"{key}_{k}")
-                    documents.append(str(v))
-
-        else:
-            ids.append(str(key))
-            documents.append(str(val))
-    return ids, documents
-
-
-def combine_fields(extracted_fields: dict, field_list: list[str]):
-    final_field_value = []
-    for field_name in field_list:
-        field_item = extracted_fields.get(field_name)
-        if not field_item:
-            continue
-        elif isinstance(field_item, str):
-            if field_type_rev_map.get(field_name) == "sentence":
-                final_field_value.append(f"{field_item}\n")
-            elif field_type_rev_map.get(field_name) == "word":
-                final_field_value.append(f"{field_item}, ")
-        elif isinstance(field_item, list):
-            final_field_value.append(", ".join([str(i) for i in field_item]) + "\n")
-
-    return "".join(final_field_value).strip()
-
-
-def combine_extracted_fields(extracted_fields: dict, combination_dict: dict):
-    combined_fields = {}
-    for collection_name, field_list in combination_dict.items():
-        combined_fields[collection_name] = combine_fields(extracted_fields, field_list)
-    return combined_fields
 
 
 def extract_metadata_fields(metadata_object: dict):
@@ -427,113 +264,138 @@ def extract_metadata_fields(metadata_object: dict):
     )
     return {
         "absolute": {
-            # From metadata object
             **clean_date_object,
             **ts_object,
-            # From extracted_metadata field
-            ## None yet. Need to either add Exif tags or clean up io.py for cleaner metadata extraction
         },
     }
 
 
-def extract_description_fields(description_object: dict):
+def extract_description_fragments(description_object: dict):
     content_object = description_object.get("content") or {}
     context_object = description_object.get("context") or {}
-
-    extracted_fields = {
-        # Will still need further refinement to handle OCR in "contains"
-        # and separate out shorter, sentence-like texts from longer, paragraph-like texts
-        # From content
+    return {
         "summary": content_object.get("summary"),
         "detailed_description": content_object.get("detailed_description"),
         "ocr_text": content_object.get("text"),
         "miscellaneous": content_object.get("miscellaneous"),
-        # From context
         "event": context_object.get("event"),
         "analysis": context_object.get("analysis"),
         "metadata_relevance": context_object.get("metadata_relevance"),
         "other_details": context_object.get("other_details"),
-        # From content
         "objects": content_object.get("objects"),
         "vibe": content_object.get("vibe"),
-        # From content
         "background": content_object.get("background"),
-        # From context
         "primary_category": context_object.get("primary_category"),
-        "intent": context_object.get("intent"),  # May need to handle "/"
+        "intent": context_object.get("intent"),
         "composition": context_object.get("composition"),
         "estimated_date": context_object.get("estimated_date"),
-        **date_dict_to_ts({"estimated_date": context_object.get("estimated_date")}),
     }
 
-    combined_fields = combine_extracted_fields(
-        extracted_fields=extracted_fields, combination_dict=collection_dict
-    )
-    final_extracted_fields = {}
-    for field_name, field_value in combined_fields.items():
-        field_type = collection_type_rev_map.get(field_name)
-        if not field_type:
+
+def normalize_field_fragment(value):
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    if isinstance(value, dict):
+        return {str(key): str(item) for key, item in value.items() if item}
+    if value:
+        return str(value)
+    return None
+
+
+def combine_field_fragments(field_fragments: dict, text_mode: str) -> str:
+    parts = []
+    for value in field_fragments.values():
+        normalized_value = normalize_field_fragment(value)
+        if not normalized_value:
             continue
-        if final_extracted_fields.get(field_type):
-            final_extracted_fields[field_type][field_name] = field_value
+        if isinstance(normalized_value, list):
+            parts.append(", ".join(normalized_value))
+        elif isinstance(normalized_value, dict):
+            parts.append(", ".join(str(item) for item in normalized_value.values()))
+        elif text_mode == "word":
+            parts.append(str(normalized_value))
         else:
-            final_extracted_fields[field_type] = {field_name: field_value}
-    return final_extracted_fields
+            parts.append(str(normalized_value))
+    separator = ", " if text_mode == "word" else "\n"
+    return separator.join(part for part in parts if part).strip(" ,\n")
 
 
-def classify_by_field_types(entries: dict, verbose: bool = False):
+def build_entry_source_records(entry_object: dict) -> dict[str, dict]:
+    metadata_object = entry_object.get("metadata") or {}
+    if not metadata_object:
+        return {}
+
+    absolute_fields = extract_metadata_fields(metadata_object).get("absolute", {})
+    description_object = entry_object.get("description") or {}
+    description_fragments = (
+        extract_description_fragments(description_object) if description_object else {}
+    )
+    source_records = {}
+
+    for source_id, source_config in SearchManifest.SOURCES.items():
+        field_fragments = {}
+        for field_name in source_config["fields"]:
+            field_value = description_fragments.get(field_name)
+            if field_value:
+                field_fragments[field_name] = field_value
+
+        document = combine_field_fragments(field_fragments, source_config["text_mode"])
+        if not document:
+            continue
+
+        metadata = {
+            "source_id": source_id,
+            "source_fields": list(field_fragments.keys()),
+            "field_fragments_json": json.dumps(
+                {
+                    key: normalize_field_fragment(value)
+                    for key, value in field_fragments.items()
+                    if normalize_field_fragment(value)
+                },
+                separators=(",", ":"),
+            ),
+        }
+        if source_config.get("date_field"):
+            metadata.update(absolute_fields)
+
+        source_records[source_id] = {
+            "document": document,
+            "metadata": metadata,
+        }
+    return source_records
+
+
+def build_source_entry_map(entries: dict, verbose: bool = False) -> dict[str, dict]:
+    source_entry_map = {source_id: {} for source_id in SearchManifest.SOURCES}
     if verbose:
         print("\n" * 4, "==" * 40, "\n" * 2)
 
-    class_wise_db_dict = {
-        "sentence": {},
-        "list": {},
-        "word": {},
-        "absolute": {},
-    }
-    metadata_dict = {}
-    for entry_hash, entry_object in entries.items():
-        metadata = entry_object.get("metadata")
-        if metadata:
-            extracted_fields = extract_metadata_fields(metadata_object=metadata)
-            description = entry_object.get("description")
-            if description:
-                extracted_fields = merge_dicts(
-                    extracted_fields,
-                    extract_description_fields(description_object=description),
-                )
-                if verbose:
-                    print(json.dumps(extracted_fields, indent=2))
-            for field_type, field_object in extracted_fields.items():
-                if field_type == "absolute":
-                    metadata_dict[entry_hash] = field_object
-                    continue
-                for field_name, field_value in field_object.items():
-                    if field_name in class_wise_db_dict[field_type]:
-                        class_wise_db_dict[field_type][field_name][
-                            entry_hash
-                        ] = field_value
-                    else:
-                        class_wise_db_dict[field_type][field_name] = {
-                            entry_hash: field_value
-                        }
-    class_wise_db_dict["absolute"] = metadata_dict
+    for entry_id, entry_object in entries.items():
+        source_records = build_entry_source_records(entry_object)
+        if verbose and source_records:
+            print(json.dumps(source_records, indent=2))
+        for source_id, record in source_records.items():
+            source_entry_map[source_id][entry_id] = record
+
     if verbose:
-        print(json.dumps(class_wise_db_dict, indent=2))
+        print(json.dumps(source_entry_map, indent=2))
+    return source_entry_map
 
-    return class_wise_db_dict
 
-
-def merge_dicts(dict1: dict, dict2: dict):
-    # Need to resolve other iterables as well
-    for key, value in dict2.items():
-        if key in dict1 and isinstance(dict1[key], dict) and isinstance(value, dict):
-            dict1[key] = merge_dicts(dict1[key], value)
-        elif key in dict1 and isinstance(dict1[key], list) and isinstance(value, list):
-            dict1[key].extend(value)
-        else:
-            dict1[key] = value
-    return dict1
+def prep_source_records_for_upsert(
+    source_records: dict,
+) -> tuple[list[str], list[str], list[dict]]:
+    ids = []
+    documents = []
+    metadatas = []
+    for entry_id, record in source_records.items():
+        document = str(record.get("document") or "").strip()
+        if not document:
+            continue
+        ids.append(str(entry_id))
+        documents.append(document)
+        metadatas.append(dict(record.get("metadata") or {}))
+    return ids, documents, metadatas
 
 
 def upsert_batch_to_collection(collection, batches, embedding_key: str | None = None):
@@ -544,12 +406,12 @@ def upsert_batch_to_collection(collection, batches, embedding_key: str | None = 
             batch_metadatas = [None] * len(batch_ids)
         else:
             batch_metadatas = list(batch_metadatas)
-        for i in range(len(batch_ids)):
-            tokens_dict = tokenize_document(batch_documents[i])
-            if batch_metadatas and isinstance(batch_metadatas[i], dict):
-                batch_metadatas[i].update(tokens_dict)
+        for index in range(len(batch_ids)):
+            tokens_dict = tokenize_document(batch_documents[index])
+            if batch_metadatas and isinstance(batch_metadatas[index], dict):
+                batch_metadatas[index].update(tokens_dict)
             else:
-                batch_metadatas[i] = tokens_dict
+                batch_metadatas[index] = tokens_dict
         prepared_batches.append((batch_ids, batch_metadatas, batch_documents))
         if embedding_key:
             documents_to_embed.extend(batch_documents)
@@ -570,9 +432,7 @@ def upsert_batch_to_collection(collection, batches, embedding_key: str | None = 
             next_offset = embedding_offset + len(batch_documents)
             upsert_kwargs["embeddings"] = embeddings[embedding_offset:next_offset]
             embedding_offset = next_offset
-        collection.upsert(
-            **upsert_kwargs,
-        )
+        collection.upsert(**upsert_kwargs)
 
 
 def populate_db(
@@ -581,193 +441,52 @@ def populate_db(
     overwrite: bool = False,
     verbose: bool = False,
 ):
-    class_wise_db_dict = classify_by_field_types(entries, verbose)
+    source_entry_map = build_source_entry_map(entries, verbose=verbose)
 
-    for field_type, field_object in class_wise_db_dict.items():
-        for field_name, field_dict in field_object.items():
-            if field_type in ["sentence", "list", "word"]:
-                ids, documents = prep_dict_for_upsert(field_dict)
-
-                if not ids or not documents:
-                    continue
-
-                collection = chroma_client.create_collection(
-                    name=field_name,
-                    configuration={"hnsw": {"space": "cosine"}},
-                    get_or_create=True,
-                )
-                if not overwrite:
-                    existing_ids = set(
-                        collection.get(ids=ids, include=[]).get("ids", [])
-                    )  # Check if documents already exist
-                    missing_ids = set(ids) - existing_ids
-                    if missing_ids:
-                        new_ids, new_documents = [], []
-                        for id, document in zip(ids, documents):
-                            if id in missing_ids:
-                                new_ids.append(id)
-                                new_documents.append(document)
-                        ids, documents = new_ids, new_documents
-                    else:
-                        continue
-
-                if field_type == "sentence" and field_name == "context_narrative":
-                    # Upsert absolute fields to a one collection to allow simpler searches
-                    absolute_fields = class_wise_db_dict.get("absolute", {})
-
-                    metadatas_list = [absolute_fields.get(id) for id in ids]
-                    batches = create_batches(
-                        chroma_client,
-                        ids=ids,
-                        metadatas=metadatas_list,
-                        documents=documents,
-                    )
-                else:
-                    batches = create_batches(
-                        chroma_client, ids=ids, documents=documents
-                    )
-                upsert_batch_to_collection(
-                    collection,
-                    batches,
-                    embedding_key=collection_embedding_key_map.get(field_type),
-                )
-
-
-def chronological_search_collection(
-    collection: chromadb.Collection,
-    query_specs: dict[str, dict],
-    date_field: str = "master_date",
-    n_results: int = 50,
-):
-    query_results_dict = {
-        "ids": [],
-        "documents": [],
-        "distances": [],
-        "rank": [],
-        "query_text": [],
-        "collection": [],
-    }
-
-    ts_field = date_field.replace("_date", "_ts")
-
-    for query_text, query_spec in query_specs.items():
-        date_filters = query_spec.get("date_filters", [])
-        if not date_filters:
+    for source_id, source_config in SearchManifest.SOURCES.items():
+        source_records = source_entry_map.get(source_id) or {}
+        ids, documents, metadatas = prep_source_records_for_upsert(source_records)
+        if not ids or not documents:
             continue
 
-        for filter_i, date_filter in enumerate(date_filters):
-            start_mask = date_filter.get("start_mask")
-            end_mask = date_filter.get("end_mask")
-            if not start_mask or not end_mask:
-                continue
-
-            where_clause = build_date_where_clause(date_field, date_filter)
-            if not where_clause:
-                continue
-
-            query_result = collection.get(
-                where=where_clause,
-                include=["documents", "metadatas"],
-            )
-
-            ids = query_result.get("ids", [])
-            documents = query_result.get("documents", [])
-            metadatas = query_result.get("metadatas", [])
-
-            specificity_score = count_mask_specificity(start_mask, end_mask)
-
-            scored = []
-            for id_, doc_, meta_ in zip(ids, documents, metadatas):
-                meta_ = meta_ or {}
-                reliability_bonus = 1 if meta_.get("date_reliability") == "high" else 0
-                ts_value = meta_.get(ts_field)
-                recency_tiebreak = (
-                    ts_value if isinstance(ts_value, (int, float)) else float("-inf")
-                )
-                score = specificity_score + reliability_bonus
-                scored.append((id_, doc_, score, recency_tiebreak))
-
-            scored.sort(key=lambda x: (x[2], x[3]), reverse=True)
-            scored = scored[:n_results]
-
-            for rank, (id_, doc_, score_, _) in enumerate(scored, start=1):
-                query_results_dict["ids"].append(id_)
-                query_results_dict["documents"].append(doc_)
-                query_results_dict["distances"].append(-float(score_))
-                query_results_dict["rank"].append(rank)
-                query_results_dict["query_text"].append(query_text)
-                query_results_dict["collection"].append(
-                    f"{collection.name}_chrono_{filter_i}"
-                )
-
-    return query_results_dict
-
-
-def lexical_search_collection(
-    collection: chromadb.Collection, query_specs: dict[str, dict], n_results: int = 50
-):
-    query_results_dict = {
-        "ids": [],
-        "documents": [],
-        "distances": [],
-        "rank": [],
-        "query_text": [],
-        "collection": [],
-    }
-
-    for query_text, query_spec in query_specs.items():
-        query_tokens = query_spec.get("tokens", [])
-        if not query_tokens:
-            continue
-
-        query_token_string = query_spec.get("token_string", "")
-        if len(query_tokens) == 1:
-            token_where = {"tokens": {"$contains": query_tokens[0]}}
-        else:
-            token_where = {
-                "$or": [{"tokens": {"$contains": token}} for token in query_tokens]
-            }
-
-        query_tokens = set(query_tokens)
-
-        query_result = collection.get(
-            where=token_where,
-            include=["documents", "metadatas"],
+        collection = chroma_client.create_collection(
+            name=source_config["collection_name"],
+            configuration={"hnsw": {"space": "cosine"}},
+            get_or_create=True,
         )
+        if not overwrite:
+            existing_ids = set(collection.get(ids=ids, include=[]).get("ids", []))
+            if existing_ids:
+                filtered_ids = []
+                filtered_documents = []
+                filtered_metadatas = []
+                for entry_id, document, metadata in zip(ids, documents, metadatas):
+                    if entry_id in existing_ids:
+                        continue
+                    filtered_ids.append(entry_id)
+                    filtered_documents.append(document)
+                    filtered_metadatas.append(metadata)
+                ids, documents, metadatas = (
+                    filtered_ids,
+                    filtered_documents,
+                    filtered_metadatas,
+                )
+            if not ids or not documents:
+                continue
 
-        ids = query_result.get("ids", [])
-        documents = query_result.get("documents", [])
-        metadatas = query_result.get("metadatas", [])
-
-        scored = []
-        for id_, doc_, meta_ in zip(ids, documents, metadatas):
-            meta_ = meta_ or {}
-
-            doc_tokens = set(meta_.get("tokens", []))
-            doc_token_string = meta_.get("token_string", "")
-            token_overlap = len(query_tokens & doc_tokens)
-            substring_bonus = (
-                2
-                if query_token_string and query_token_string in doc_token_string
-                else 0
-            )
-            score = token_overlap + substring_bonus
-
-            if score > 0:
-                scored.append((id_, doc_, score))
-
-        scored.sort(key=lambda x: x[2], reverse=True)
-        scored = scored[:n_results]
-
-        for rank, (id_, doc_, score_) in enumerate(scored, start=1):
-            query_results_dict["ids"].append(id_)
-            query_results_dict["documents"].append(doc_)
-            query_results_dict["distances"].append(-float(score_))
-            query_results_dict["rank"].append(rank)
-            query_results_dict["query_text"].append(query_text)
-            query_results_dict["collection"].append(f"{collection.name}_lexical")
-
-    return query_results_dict
+        batches = create_batches(
+            chroma_client,
+            ids=ids,
+            metadatas=metadatas,
+            documents=documents,
+        )
+        upsert_batch_to_collection(
+            collection,
+            batches,
+            embedding_key=get_embedding_key_for_family(
+                source_config.get("embedding_family")
+            ),
+        )
 
 
 def delete_entry_ids(chroma_client, entry_ids: list[str]):
@@ -806,256 +525,590 @@ def delete_entry_ids(chroma_client, entry_ids: list[str]):
             collection.delete(ids=ids_to_delete)
 
 
+def lexical_search_collection(
+    collection: chromadb.Collection,
+    query_specs: dict[str, dict],
+    source_plan: dict,
+    search_plan: dict,
+    trace_logs: list | None = None,
+    trace: bool = False,
+):
+    rows = []
+    debug_rows = []
+
+    for query_text, query_spec in query_specs.items():
+        query_tokens = query_spec.get("tokens", [])
+        if not query_tokens:
+            continue
+
+        query_token_string = query_spec.get("token_string", "")
+        token_where = (
+            {"tokens": {"$contains": query_tokens[0]}}
+            if len(query_tokens) == 1
+            else {"$or": [{"tokens": {"$contains": token}} for token in query_tokens]}
+        )
+
+        query_result = collection.get(
+            where=token_where, include=["documents", "metadatas"]
+        )
+        ids = query_result.get("ids", [])
+        documents = query_result.get("documents", [])
+        metadatas = query_result.get("metadatas", [])
+
+        scored = []
+        min_coverage = float(search_plan["thresholds"].get("min_coverage", 0.0) or 0.0)
+        phrase_bonus = float(search_plan["thresholds"].get("phrase_bonus", 0.0) or 0.0)
+
+        for id_, document, metadata in zip(ids, documents, metadatas):
+            metadata = dict(metadata or {})
+            doc_tokens = set(metadata.get("tokens", []))
+            if not doc_tokens:
+                doc_tokens = set(tokenize_document(document).get("tokens", []))
+            doc_token_string = metadata.get("token_string", "") or tokenize_document(
+                document
+            ).get("token_string", "")
+            token_overlap = len(set(query_tokens) & doc_tokens)
+            coverage = token_overlap / max(1, len(query_tokens))
+            phrase_hit = bool(
+                query_token_string and query_token_string in doc_token_string
+            )
+            normalized_score = min(
+                1.0, coverage + (phrase_bonus if phrase_hit else 0.0)
+            )
+
+            if len(query_tokens) == 1:
+                threshold_passed = token_overlap > 0
+                threshold_reason = "single-token overlap required"
+            else:
+                threshold_passed = coverage >= min_coverage or phrase_hit
+                threshold_reason = (
+                    f"coverage>={min_coverage:.2f}"
+                    if threshold_passed
+                    else f"coverage {coverage:.2f} below {min_coverage:.2f}"
+                )
+
+            candidate = build_candidate_row(
+                query_text=query_text,
+                query_spec=query_spec,
+                source_plan=source_plan,
+                search_type="lexical",
+                id_=id_,
+                document=document,
+                metadata=metadata,
+                raw_score=coverage + (phrase_bonus if phrase_hit else 0.0),
+                raw_distance=None,
+                normalized_score=normalized_score,
+                threshold_passed=threshold_passed,
+                threshold_reason=threshold_reason,
+            )
+            candidate["coverage"] = coverage
+            candidate["phrase_hit"] = phrase_hit
+            scored.append(candidate)
+
+        scored.sort(
+            key=lambda row: (
+                row["threshold_passed"],
+                row.get("phrase_hit", False),
+                row.get("raw_score") or 0.0,
+                row["id"],
+            ),
+            reverse=True,
+        )
+        kept = [row for row in scored if row["threshold_passed"]][
+            : search_plan["fetch_limit"]
+        ]
+        for rank, row in enumerate(kept, start=1):
+            row["rank"] = rank
+        rows.extend(kept)
+
+        debug_entry = summarize_source_debug(
+            source_plan=source_plan,
+            search_type="lexical",
+            query_text=query_text,
+            thresholds=search_plan["thresholds"],
+            before_count=len(scored),
+            after_count=len(kept),
+            kept_rows=kept,
+            search_plan=search_plan,
+        )
+        debug_rows.append(debug_entry)
+        trace_line(
+            trace_logs,
+            trace,
+            f"{query_text} lexical {source_plan['source_id']}: kept {len(kept)} of {len(scored)}",
+        )
+
+    return rows, debug_rows
+
+
+def chronological_search_collection(
+    collection: chromadb.Collection,
+    query_specs: dict[str, dict],
+    source_plan: dict,
+    search_plan: dict,
+    trace_logs: list | None = None,
+    trace: bool = False,
+):
+    rows = []
+    debug_rows = []
+    date_field = SearchManifest.SOURCES[source_plan["source_id"]].get(
+        "date_field", "master_date"
+    )
+    ts_field = date_field.replace("_date", "_ts")
+
+    for query_text, query_spec in query_specs.items():
+        date_filters = query_spec.get("date_filters", [])
+        if not date_filters:
+            continue
+
+        scored = []
+        min_specificity = int(search_plan["thresholds"].get("min_specificity", 1) or 1)
+        for filter_index, date_filter in enumerate(date_filters):
+            start_mask = date_filter.get("start_mask")
+            end_mask = date_filter.get("end_mask")
+            if not start_mask or not end_mask:
+                continue
+
+            where_clause = build_date_where_clause(date_field, date_filter)
+            if not where_clause:
+                continue
+
+            query_result = collection.get(
+                where=where_clause, include=["documents", "metadatas"]
+            )
+            ids = query_result.get("ids", [])
+            documents = query_result.get("documents", [])
+            metadatas = query_result.get("metadatas", [])
+            specificity_score = count_mask_specificity(start_mask, end_mask)
+
+            for id_, document, metadata in zip(ids, documents, metadatas):
+                metadata = dict(metadata or {})
+                reliability_bonus = (
+                    1 if metadata.get("date_reliability") == "high" else 0
+                )
+                ts_value = metadata.get(ts_field)
+                recency_tiebreak = (
+                    ts_value if isinstance(ts_value, (int, float)) else float("-inf")
+                )
+                raw_score = float(specificity_score + reliability_bonus)
+                threshold_passed = raw_score >= min_specificity
+                threshold_reason = (
+                    f"specificity>={min_specificity}"
+                    if threshold_passed
+                    else f"specificity {raw_score:.2f} below {min_specificity}"
+                )
+                candidate = build_candidate_row(
+                    query_text=query_text,
+                    query_spec=query_spec,
+                    source_plan=source_plan,
+                    search_type="chrono",
+                    id_=id_,
+                    document=document,
+                    metadata=metadata,
+                    raw_score=raw_score,
+                    raw_distance=None,
+                    normalized_score=max(raw_score, 0.0),
+                    threshold_passed=threshold_passed,
+                    threshold_reason=threshold_reason,
+                    variant=str(filter_index),
+                )
+                candidate["recency_tiebreak"] = recency_tiebreak
+                scored.append(candidate)
+
+        scored.sort(
+            key=lambda row: (
+                row["threshold_passed"],
+                row.get("raw_score") or 0.0,
+                row.get("recency_tiebreak", float("-inf")),
+                row["id"],
+            ),
+            reverse=True,
+        )
+        kept = [row for row in scored if row["threshold_passed"]][
+            : search_plan["fetch_limit"]
+        ]
+        max_score = max((row.get("raw_score") or 0.0) for row in kept) if kept else 0.0
+        for rank, row in enumerate(kept, start=1):
+            row["rank"] = rank
+            row["normalized_score"] = (
+                (row.get("raw_score") or 0.0) / max_score if max_score > 0 else 0.0
+            )
+        rows.extend(kept)
+
+        debug_entry = summarize_source_debug(
+            source_plan=source_plan,
+            search_type="chrono",
+            query_text=query_text,
+            thresholds=search_plan["thresholds"],
+            before_count=len(scored),
+            after_count=len(kept),
+            kept_rows=kept,
+            search_plan=search_plan,
+        )
+        debug_rows.append(debug_entry)
+        trace_line(
+            trace_logs,
+            trace,
+            f"{query_text} chrono {source_plan['source_id']}: kept {len(kept)} of {len(scored)}",
+        )
+
+    return rows, debug_rows
+
+
 def semantic_search_collection(
     collection: chromadb.Collection,
     query_specs: dict[str, dict],
-    embedding_key: str,
-    n_results: int = 50,
+    source_plan: dict,
+    search_plan: dict,
+    trace_logs: list | None = None,
+    trace: bool = False,
 ):
+    rows = []
+    debug_rows = []
+    embedding_key = get_embedding_key_for_family(
+        SearchManifest.SOURCES[source_plan["source_id"]].get("embedding_family")
+    )
+    if not embedding_key:
+        return rows, debug_rows
+
     final_query_texts = []
     query_embeddings = []
     for query_text, query_spec in query_specs.items():
+        if not query_spec.get("tokens"):
+            continue
         query_embedding = (query_spec.get("embeddings") or {}).get(embedding_key)
         if query_embedding is None:
             raise ValueError(f"Embedding for query text '{query_text}' is missing.")
         final_query_texts.append(query_text)
         query_embeddings.append(query_embedding)
 
+    if not query_embeddings:
+        return rows, debug_rows
+
     query_results = collection.query(
         query_embeddings=query_embeddings,
-        n_results=n_results,
-        include=["documents", "distances"],
+        n_results=search_plan["fetch_limit"],
+        include=["documents", "distances", "metadatas"],
     )
 
-    query_results_dict = {
-        "ids": [],
-        "documents": [],
-        "distances": [],
-        "rank": [],
-        "query_text": [],
-        "collection": [],
-    }
-    for i, query_text in enumerate(final_query_texts):
-        if (
-            i >= len(query_results.get("ids", []))
-            or not query_results.get("ids", [])[i]
+    absolute_limit = float(search_plan["thresholds"].get("max_distance", 1.0) or 1.0)
+    tail_delta = float(search_plan["thresholds"].get("tail_delta", 0.0) or 0.0)
+
+    for index, query_text in enumerate(final_query_texts):
+        ids = (
+            (query_results.get("ids") or [[]])[index]
+            if index < len(query_results.get("ids", []))
+            else []
+        )
+        if not ids:
+            debug_rows.append(
+                summarize_source_debug(
+                    source_plan=source_plan,
+                    search_type="semantic",
+                    query_text=query_text,
+                    thresholds=search_plan["thresholds"],
+                    before_count=0,
+                    after_count=0,
+                    kept_rows=[],
+                    search_plan=search_plan,
+                )
+            )
+            continue
+
+        documents = (query_results.get("documents") or [[]])[index]
+        distances = (query_results.get("distances") or [[]])[index]
+        metadatas = (query_results.get("metadatas") or [[]])[index]
+        best_distance = min(distances) if distances else float("inf")
+        dynamic_limit = best_distance + tail_delta
+
+        scored = []
+        for id_, document, distance, metadata in zip(
+            ids, documents, distances, metadatas
         ):
-            continue
+            metadata = dict(metadata or {})
+            threshold_passed = distance <= absolute_limit and distance <= dynamic_limit
+            threshold_reason = (
+                f"distance<={absolute_limit:.3f} and <={dynamic_limit:.3f}"
+                if threshold_passed
+                else f"distance {distance:.3f} above {min(absolute_limit, dynamic_limit):.3f}"
+            )
+            admission_limit = max(min(absolute_limit, dynamic_limit), 1e-6)
+            normalized_score = max(0.0, 1.0 - (float(distance) / admission_limit))
+            candidate = build_candidate_row(
+                query_text=query_text,
+                query_spec=query_specs[query_text],
+                source_plan=source_plan,
+                search_type="semantic",
+                id_=id_,
+                document=document,
+                metadata=metadata,
+                raw_score=None,
+                raw_distance=float(distance),
+                normalized_score=normalized_score,
+                threshold_passed=threshold_passed,
+                threshold_reason=threshold_reason,
+            )
+            scored.append(candidate)
 
-        query_results_dict["ids"].extend(query_results.get("ids", [])[i])
-        query_results_dict["documents"].extend(query_results.get("documents", [])[i])
-        query_results_dict["distances"].extend(query_results.get("distances", [])[i])
-        res_len = len(query_results.get("ids", [])[i])
-        query_results_dict["rank"].extend(list(range(1, 1 + res_len)))
-        query_results_dict["query_text"].extend([query_text] * res_len)
-        query_results_dict["collection"].extend([collection.name] * res_len)
-    return query_results_dict
+        scored.sort(
+            key=lambda row: (
+                row["threshold_passed"],
+                -(row.get("raw_distance") or float("inf")),
+                row["id"],
+            ),
+            reverse=True,
+        )
+        kept = [row for row in scored if row["threshold_passed"]]
+        kept.sort(
+            key=lambda row: ((row.get("raw_distance") or float("inf")), row["id"])
+        )
+        kept = kept[: search_plan["fetch_limit"]]
+        for rank, row in enumerate(kept, start=1):
+            row["rank"] = rank
+        rows.extend(kept)
+
+        debug_entry = summarize_source_debug(
+            source_plan=source_plan,
+            search_type="semantic",
+            query_text=query_text,
+            thresholds={
+                **search_plan["thresholds"],
+                "best_distance": best_distance,
+                "dynamic_limit": dynamic_limit,
+            },
+            before_count=len(scored),
+            after_count=len(kept),
+            kept_rows=kept,
+            search_plan=search_plan,
+        )
+        debug_rows.append(debug_entry)
+        trace_line(
+            trace_logs,
+            trace,
+            f"{query_text} semantic {source_plan['source_id']}: "
+            f"kept {len(kept)} of {len(scored)} "
+            f"(best={best_distance:.3f}, limit={min(absolute_limit, dynamic_limit):.3f})",
+        )
+
+    return rows, debug_rows
 
 
-def get_final_results(
-    query_text: str | list,
-    query_results_df: pd.DataFrame,
-    rrf_smoothing: int = 60,
+def query_collections(
+    chroma_client: chromadb.PersistentClient,
+    query_texts: list,
     n_results: int = 5,
+    search_options: dict | None = None,
+    include_debug: bool = False,
+    trace: bool = False,
 ):
-    if query_results_df.empty:
-        return pd.DataFrame(columns=["ids", "score", "rank"])
-
-    relevant_df = query_results_df.copy()
-    relevant_df["query_text"] = (
-        relevant_df["query_text"].astype(str).str.strip().str.lower()
+    query_specs = build_query_specs(query_texts)
+    trace_logs = make_trace_logs(include_debug=include_debug, trace=trace)
+    runtime_plan = resolve_runtime_plan(
+        query_specs,
+        n_results=n_results,
+        search_options=search_options,
+        include_debug=include_debug,
+        trace=trace,
+        trace_logs=trace_logs,
     )
-
-    if isinstance(query_text, str):
-        mask = relevant_df["query_text"] == normalize_query_text(query_text)
-    elif isinstance(query_text, list):
-        mask = relevant_df["query_text"].isin(
-            [normalize_query_text(q) for q in query_text]
-        )
-    else:
-        return pd.DataFrame(columns=["ids", "score", "rank"])
-
-    relevant_df = relevant_df[mask].copy()
-
-    if relevant_df.empty:
-        return pd.DataFrame(columns=["ids", "score", "rank"])
-
-    relevant_df["ids"] = relevant_df["ids"].astype(str).str[:105]
-    chrono_mask = (
-        relevant_df["collection"]
-        .astype(str)
-        .str.startswith("context_narrative_chrono_")
-    )
-    if chrono_mask.any():
-        chrono_df = relevant_df[chrono_mask].copy()
-        chrono_df["chrono_rrf_score"] = 1 / (chrono_df["rank"] + rrf_smoothing)
-        chrono_vals = (
-            chrono_df.groupby("ids")["chrono_rrf_score"]
-            .sum()
-            .sort_values(ascending=False)
-        )
-        chrono_agg_df = pd.DataFrame(
-            {
-                "ids": chrono_vals.index,
-                "documents": [""] * len(chrono_vals),
-                "distances": -chrono_vals.values,
-                "rank": list(range(1, len(chrono_vals) + 1)),
-                "query_text": [relevant_df["query_text"].iloc[0]] * len(chrono_vals),
-                "collection": ["context_narrative_chrono"] * len(chrono_vals),
-            }
-        )
-        relevant_df = pd.concat(
-            [relevant_df[~chrono_mask], chrono_agg_df], ignore_index=True
-        )
-
-    weights = relevant_df["collection"].map(field_weight_dict).fillna(0.2)
-    relevant_df["rrf_score"] = weights / (relevant_df["rank"] + rrf_smoothing)
-
-    rrf_vals = relevant_df.groupby("ids")["rrf_score"].sum().nlargest(n_results)
-    return pd.DataFrame(
-        {
-            "ids": rrf_vals.index,
-            "score": rrf_vals.values,
-            "rank": list(range(len(rrf_vals))),
-        }
-    )
-
-def query_all_collections(
-    chroma_client: chromadb.PersistentClient, query_texts: list, n_results: int = 5
-):
-    query_specs = {}
-    pending_query_texts = list(reversed(query_texts))
-    while pending_query_texts:
-        query_text = pending_query_texts.pop()
-        if isinstance(query_text, list):
-            pending_query_texts.extend(reversed(query_text))
-            continue
-        if not isinstance(query_text, str):
-            continue
-
-        normalized_query_text = normalize_query_text(query_text)
-        if normalized_query_text in query_specs:
-            continue
-
-        date_info = extract_date_filter_from_query(normalized_query_text)
-        clean_query_text = date_info.get("clean_query_text", "")
-        token_metadata = tokenize_document(clean_query_text)
-        query_tokens = token_metadata.get("tokens", [])
-        query_specs[normalized_query_text] = {
-            "query_text": normalized_query_text,
-            "clean_query_text": clean_query_text,
-            "tokens": query_tokens,
-            "token_string": token_metadata.get("token_string", ""),
-            "date_filters": date_info.get("date_filters", []),
-            "is_pure_date_query": bool(date_info.get("date_filters")) and not query_tokens,
-            "embeddings": {},
-        }
 
     semantic_query_specs = {
         query_text: query_spec
         for query_text, query_spec in query_specs.items()
         if query_spec.get("tokens")
     }
-    if semantic_query_specs:
+
+    required_embedding_families = sorted(
+        {
+            SearchManifest.SOURCES[source_id].get("embedding_family")
+            for source_id, source_plan in runtime_plan["sources"].items()
+            for search_type, search_plan in source_plan["search_types"].items()
+            if search_type == "semantic"
+            and search_plan["enabled"]
+            and search_plan["weight"] > 0
+        }
+        - {None}
+    )
+    if semantic_query_specs and required_embedding_families:
         semantic_query_texts = list(semantic_query_specs.keys())
-        for embedding_key in dict.fromkeys(collection_embedding_key_map.values()):
+        for embedding_family in required_embedding_families:
+            embedding_key = get_embedding_key_for_family(embedding_family)
             embeddings = generate_embeddings_for_key(
-                semantic_query_texts,
-                embedding_key,
+                semantic_query_texts, embedding_key
             )
-            for i, query_text in enumerate(semantic_query_texts):
+            for index, query_text in enumerate(semantic_query_texts):
                 semantic_query_specs[query_text]["embeddings"][embedding_key] = (
-                    embeddings[i]
+                    embeddings[index]
                 )
-
-    chronological_query_specs = {
-        query_text: query_spec
-        for query_text, query_spec in query_specs.items()
-        if query_spec.get("date_filters")
-    }
-
-    combined_query_results = {
-        "ids": [],
-        "documents": [],
-        "distances": [],
-        "rank": [],
-        "query_text": [],
-        "collection": [],
-    }
 
     existing_collection_refs = {}
     for collection_ref in chroma_client.list_collections():
         collection_name = (
-            collection_ref.name
-            if hasattr(collection_ref, "name")
-            else collection_ref
+            collection_ref.name if hasattr(collection_ref, "name") else collection_ref
         )
         if collection_name:
             existing_collection_refs[collection_name] = collection_ref
 
-    for col_name in collection_dict:
-        collection_ref = existing_collection_refs.get(col_name)
-        if collection_ref is None:
+    combined_rows = []
+    debug_rows = []
+    for source_id, source_plan in runtime_plan["sources"].items():
+        if not source_plan["enabled"]:
             continue
 
-        col_type = collection_type_rev_map.get(col_name) or "sentence"
-        collection_embedding_key = collection_embedding_key_map.get(col_type)
+        collection_ref = existing_collection_refs.get(source_plan["collection_name"])
+        if collection_ref is None:
+            trace_line(
+                trace_logs,
+                trace,
+                f"source {source_id}: skipped missing collection {source_plan['collection_name']}",
+            )
+            continue
+
         collection = (
             collection_ref
             if hasattr(collection_ref, "query")
-            else chroma_client.get_collection(col_name)
+            else chroma_client.get_collection(source_plan["collection_name"])
         )
 
         try:
-            if semantic_query_specs:
-                lexical_query_results_dict = lexical_search_collection(
+            lexical_plan = source_plan["search_types"].get("lexical")
+            if lexical_plan and lexical_plan["enabled"] and lexical_plan["weight"] > 0:
+                lexical_rows, lexical_debug_rows = lexical_search_collection(
                     collection=collection,
                     query_specs=semantic_query_specs,
-                    n_results=min(n_results * 50, 500),
+                    source_plan=source_plan,
+                    search_plan=lexical_plan,
+                    trace_logs=trace_logs,
+                    trace=trace,
                 )
-                if lexical_query_results_dict:
-                    for key in combined_query_results:
-                        combined_query_results[key].extend(
-                            lexical_query_results_dict.get(key, [])
-                        )
+                combined_rows.extend(lexical_rows)
+                debug_rows.extend(lexical_debug_rows)
 
-            if col_name == "context_narrative" and chronological_query_specs:
-                chrono_query_results_dict = chronological_search_collection(
+            chrono_plan = source_plan["search_types"].get("chrono")
+            if chrono_plan and chrono_plan["enabled"] and chrono_plan["weight"] > 0:
+                chrono_rows, chrono_debug_rows = chronological_search_collection(
                     collection=collection,
-                    query_specs=chronological_query_specs,
-                    date_field="master_date",
-                    n_results=min(n_results * 50, 500),
+                    query_specs=query_specs,
+                    source_plan=source_plan,
+                    search_plan=chrono_plan,
+                    trace_logs=trace_logs,
+                    trace=trace,
                 )
-                if chrono_query_results_dict:
-                    for key in combined_query_results:
-                        combined_query_results[key].extend(
-                            chrono_query_results_dict.get(key, [])
-                        )
+                combined_rows.extend(chrono_rows)
+                debug_rows.extend(chrono_debug_rows)
 
-            if semantic_query_specs and collection_embedding_key:
-                semantic_query_results_dict = semantic_search_collection(
+            semantic_plan = source_plan["search_types"].get("semantic")
+            if (
+                semantic_plan
+                and semantic_plan["enabled"]
+                and semantic_plan["weight"] > 0
+            ):
+                semantic_rows, semantic_debug_rows = semantic_search_collection(
                     collection=collection,
                     query_specs=semantic_query_specs,
-                    embedding_key=collection_embedding_key,
-                    n_results=min(n_results * 10, 500),
+                    source_plan=source_plan,
+                    search_plan=semantic_plan,
+                    trace_logs=trace_logs,
+                    trace=trace,
                 )
-                if semantic_query_results_dict:
-                    for key in combined_query_results:
-                        combined_query_results[key].extend(
-                            semantic_query_results_dict.get(key, [])
-                        )
+                combined_rows.extend(semantic_rows)
+                debug_rows.extend(semantic_debug_rows)
         except Exception as exc:
-            print(f"Skipping Chroma collection '{col_name}' after query error: {exc}")
-
-    combined_query_results = pd.DataFrame(combined_query_results)
+            trace_line(
+                trace_logs,
+                trace,
+                f"source {source_id}: skipped after query error {exc}",
+            )
 
     final_results = {}
-    for query_text in query_texts:
-        result = get_final_results(
-            normalize_query_text(query_text),
-            combined_query_results,
+    for original_query_text in query_texts:
+        normalized_query = normalize_query_text(original_query_text)
+        response = build_query_response(
+            query_text=(
+                normalized_query
+                if isinstance(normalized_query, str)
+                else str(normalized_query)
+            ),
+            query_rows=combined_rows,
+            runtime_plan=runtime_plan,
+            debug_rows=debug_rows,
             n_results=n_results,
+            trace_logs=trace_logs,
+            trace=trace,
         )
-        final_results[str(query_text)] = {k: list(result[k]) for k in result}
-
+        final_results[str(original_query_text)] = response
     return final_results
+
+
+def query_all_collections(
+    chroma_client: chromadb.PersistentClient,
+    query_texts: list,
+    n_results: int = 5,
+    search_options: dict | None = None,
+    include_debug: bool = False,
+    trace: bool = False,
+):
+    return query_collections(
+        chroma_client=chroma_client,
+        query_texts=query_texts,
+        n_results=n_results,
+        search_options=search_options,
+        include_debug=include_debug,
+        trace=trace,
+    )
+
+
+def load_env_if_available() -> None:
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+    load_dotenv()
+
+
+LOCAL_QUERY_RUN = {
+    "query_texts": [],
+    "n_results": 5,
+    "search_options": {
+        "preset": SearchManifest.DEFAULT_PRESET,
+        "focus": dict(SearchManifest.DEFAULT_FOCUS),
+        "enabled_sources": [],
+        "disabled_sources": [],
+        "enabled_search_types": list(SearchManifest.SEARCH_TYPES),
+        "capabilities": [],
+    },
+    "include_debug": True,
+    "trace": False,
+    "chroma_path": None,
+}
+
+
+def main(run_config: dict | None = None) -> None:
+    load_env_if_available()
+    config = run_config or LOCAL_QUERY_RUN
+    query_texts = [
+        str(query_text).strip()
+        for query_text in (config.get("query_texts") or [])
+        if str(query_text).strip()
+    ]
+    if not query_texts:
+        raise ValueError(
+            "Set LOCAL_QUERY_RUN['query_texts'] in utils/chroma.py before running this module."
+        )
+
+    client = get_chroma_client(
+        path=config.get("chroma_path") or os.getenv("CHROMA_URL")
+    )
+    result = query_collections(
+        chroma_client=client,
+        query_texts=query_texts,
+        n_results=max(1, int(config.get("n_results", 5) or 5)),
+        search_options=config.get("search_options"),
+        include_debug=bool(config.get("include_debug")),
+        trace=bool(config.get("trace")),
+    )
+    print(json.dumps(result, indent=2, default=str))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,4 +1,8 @@
-"""Streamlit application orchestration."""
+"""
+app.py
+
+Streamlit application entrypoint for search, upload, gallery, and Chroma views.
+"""
 
 from time import perf_counter
 
@@ -13,6 +17,7 @@ from ui.components import (
     get_selected_entry_id,
     render_app_shell,
     render_results_grid,
+    render_search_debug_panel,
     search_settings_dialog,
 )
 from ui.config import DEFAULT_TOP_N
@@ -26,16 +31,14 @@ from ui.filters import (
 from ui.gallery import render_gallery_page
 from ui.history import (
     clear_history,
-    coerce_scores,
     history_label,
     load_history,
     save_search,
 )
 from ui.upload import render_upload_page
+from utils.retrieval import SearchManifest
 
-EMPTY_STATE = (
-    "Describe the photo, video, or text you want to find."
-)
+EMPTY_STATE = "Describe the photo, video, or text you want to find."
 
 
 def initialize_state() -> None:
@@ -43,7 +46,17 @@ def initialize_state() -> None:
         "page": "Search",
         "search_query": "",
         "top_n": DEFAULT_TOP_N,
+        "search_preset": SearchManifest.DEFAULT_PRESET,
+        "search_focus_words": SearchManifest.DEFAULT_FOCUS["words"],
+        "search_focus_meaning": SearchManifest.DEFAULT_FOCUS["meaning"],
+        "search_focus_text": SearchManifest.DEFAULT_FOCUS["text"],
+        "search_focus_time": SearchManifest.DEFAULT_FOCUS["time"],
+        "search_include_debug": False,
+        "search_enabled_search_types": list(SearchManifest.SEARCH_TYPES),
+        "search_enabled_sources": list(SearchManifest.SOURCES),
+        "search_capabilities": [],
         "filter_media_type": "All",
+        "filter_result_sources": [],
         "filter_extensions": [],
         "filter_min_score": 0.0,
         "filter_date_from": "",
@@ -53,6 +66,11 @@ def initialize_state() -> None:
         "last_result_scores": [],
         "last_result_ranks": {},
         "last_result_score_by_id": {},
+        "last_result_items": [],
+        "last_result_item_by_id": {},
+        "last_search_response": {},
+        "last_search_plan": {},
+        "last_search_options": {},
     }.items():
         st.session_state.setdefault(key, value)
 
@@ -110,19 +128,80 @@ else:
 
 def restore_search_state(item: dict) -> None:
     filters = item.get("filters") or {}
+    search_options = item.get("search_options") or {}
+    preset = search_options.get("preset") or SearchManifest.DEFAULT_PRESET
+    preset_focus = dict(SearchManifest.DEFAULT_FOCUS)
+    preset_focus.update((SearchManifest.PRESETS.get(preset) or {}).get("focus") or {})
+    focus = search_options.get("focus") or {}
     st.session_state["search_query"] = item.get("query", "")
     st.session_state["top_n"] = int(item.get("top_n", DEFAULT_TOP_N) or DEFAULT_TOP_N)
+    st.session_state["search_preset"] = preset
+    st.session_state["search_focus_words"] = int(
+        focus.get("words", preset_focus["words"]) or 0
+    )
+    st.session_state["search_focus_meaning"] = int(
+        focus.get("meaning", preset_focus["meaning"]) or 0
+    )
+    st.session_state["search_focus_text"] = int(
+        focus.get("text", preset_focus["text"]) or 0
+    )
+    st.session_state["search_focus_time"] = int(
+        focus.get("time", preset_focus["time"]) or 0
+    )
+    st.session_state["search_enabled_search_types"] = list(
+        search_options.get("enabled_search_types") or SearchManifest.SEARCH_TYPES
+    )
+    st.session_state["search_enabled_sources"] = list(
+        search_options.get("enabled_sources") or SearchManifest.SOURCES
+    )
+    st.session_state["search_capabilities"] = list(
+        search_options.get("capabilities") or []
+    )
+    st.session_state["search_include_debug"] = bool(item.get("debug_enabled", False))
     st.session_state["filter_media_type"] = filters.get("media_type", "All")
+    st.session_state["filter_result_sources"] = filters.get("result_sources", [])
     st.session_state["filter_extensions"] = filters.get("extensions", [])
     st.session_state["filter_min_score"] = float(filters.get("min_score", 0.0) or 0)
     st.session_state["filter_date_from"] = filters.get("date_from", "")
     st.session_state["filter_date_to"] = filters.get("date_to", "")
 
 
-def load_saved_result(item: dict) -> tuple[list[str], dict, list[float | None], float]:
-    restore_search_state(item)
-    ids = [str(entry_id) for entry_id in item.get("ids", [])]
-    return ids, get_entries(ids), coerce_scores(item.get("scores")), 0.0
+def search_options_from_state() -> dict:
+    return {
+        "preset": st.session_state.get("search_preset", SearchManifest.DEFAULT_PRESET),
+        "focus": {
+            "words": int(
+                st.session_state.get(
+                    "search_focus_words", SearchManifest.DEFAULT_FOCUS["words"]
+                )
+            ),
+            "meaning": int(
+                st.session_state.get(
+                    "search_focus_meaning",
+                    SearchManifest.DEFAULT_FOCUS["meaning"],
+                )
+            ),
+            "text": int(
+                st.session_state.get(
+                    "search_focus_text", SearchManifest.DEFAULT_FOCUS["text"]
+                )
+            ),
+            "time": int(
+                st.session_state.get(
+                    "search_focus_time", SearchManifest.DEFAULT_FOCUS["time"]
+                )
+            ),
+        },
+        "enabled_sources": list(
+            st.session_state.get("search_enabled_sources", list(SearchManifest.SOURCES))
+        ),
+        "enabled_search_types": list(
+            st.session_state.get(
+                "search_enabled_search_types", list(SearchManifest.SEARCH_TYPES)
+            )
+        ),
+        "capabilities": list(st.session_state.get("search_capabilities", [])),
+    }
 
 
 def render_search_controls() -> bool:
@@ -183,12 +262,22 @@ def render_empty_state() -> None:
     )
 
 
-def search(query: str, top_n: int) -> tuple[list[str], dict, list[float], float]:
+def search(
+    query: str,
+    top_n: int,
+    search_options: dict,
+    include_debug: bool,
+) -> tuple[list[str], dict, list[float], dict, float]:
     start = perf_counter()
-    ids, result = get_query_results(query=query, top_n=top_n)
+    ids, result = get_query_results(
+        query=query,
+        top_n=top_n,
+        search_options=search_options,
+        include_debug=include_debug,
+    )
     entries = get_entries(ids)
     elapsed_ms = (perf_counter() - start) * 1000
-    return ids, entries, result.get("score", []), elapsed_ms
+    return ids, entries, result.get("score", []), result, elapsed_ms
 
 
 def candidate_count(top_n: int, filters: dict) -> int:
@@ -220,17 +309,41 @@ def main() -> None:
     if history_item:
         clear_selected_entry_id()
         with st.spinner("Loading saved results..."):
-            ids, entries, scores, elapsed_ms = load_saved_result(history_item)
+            restore_search_state(history_item)
+            replay_query = st.session_state["search_query"].strip()
+            replay_filters = active_filters_from_state(st.session_state)
+            search_options = search_options_from_state()
+            ids, entries, scores, result, elapsed_ms = search(
+                query=replay_query,
+                top_n=candidate_count(int(st.session_state["top_n"]), replay_filters),
+                search_options=search_options,
+                include_debug=bool(st.session_state.get("search_include_debug")),
+            )
+            result_items = result.get("items") or []
+            result_item_by_id = {item["id"]: item for item in result_items}
+            filtered_ids, filtered_scores, filtered_items = apply_result_filters(
+                ids=ids,
+                entries=entries,
+                scores=scores,
+                result_items_by_id=result_item_by_id,
+                filters=replay_filters,
+                limit=int(st.session_state["top_n"]),
+            )
         st.session_state.update(
             last_query=st.session_state["search_query"],
-            last_result_ids=ids,
+            last_result_ids=filtered_ids,
             last_result_entries=entries,
-            last_result_scores=scores,
+            last_result_scores=filtered_scores,
+            last_result_items=filtered_items,
+            last_result_item_by_id={item["id"]: item for item in filtered_items},
             last_search_ms=elapsed_ms,
             last_candidate_count=len(ids),
             last_filters_active=filters_are_active(
                 active_filters_from_state(st.session_state)
             ),
+            last_search_response=result,
+            last_search_plan=result.get("search_plan") or {},
+            last_search_options=search_options,
         )
 
     submitted = render_search_controls()
@@ -240,6 +353,7 @@ def main() -> None:
         query = st.session_state["search_query"].strip()
         top_n = int(st.session_state["top_n"])
         filters = active_filters_from_state(st.session_state)
+        search_options = search_options_from_state()
         if not query:
             st.warning("Enter a query first.")
             render_empty_state()
@@ -247,19 +361,24 @@ def main() -> None:
 
         try:
             with st.spinner("Searching indexed media..."):
-                ids, entries, scores, elapsed_ms = search(
+                ids, entries, scores, result, elapsed_ms = search(
                     query=query,
                     top_n=candidate_count(top_n, filters),
+                    search_options=search_options,
+                    include_debug=bool(st.session_state.get("search_include_debug")),
                 )
         except Exception as exc:
             st.error("Search failed. Check MongoDB, Chroma, Ollama, and .env settings.")
             st.exception(exc)
             return
 
-        result_ids, result_scores = apply_result_filters(
+        result_items = result.get("items") or []
+        result_item_by_id = {item["id"]: item for item in result_items}
+        result_ids, result_scores, filtered_items = apply_result_filters(
             ids=ids,
             entries=entries,
             scores=scores,
+            result_items_by_id=result_item_by_id,
             filters=filters,
             limit=top_n,
         )
@@ -267,6 +386,8 @@ def main() -> None:
             query=query,
             top_n=top_n,
             filters=filters,
+            search_options=search_options,
+            debug_enabled=bool(st.session_state.get("search_include_debug")),
             ids=result_ids,
             scores=result_scores,
         )
@@ -275,9 +396,14 @@ def main() -> None:
             last_result_ids=result_ids,
             last_result_entries=entries,
             last_result_scores=result_scores,
+            last_result_items=filtered_items,
+            last_result_item_by_id={item["id"]: item for item in filtered_items},
             last_search_ms=elapsed_ms,
             last_candidate_count=len(ids),
             last_filters_active=filters_are_active(filters),
+            last_search_response=result,
+            last_search_plan=result.get("search_plan") or {},
+            last_search_options=search_options,
         )
 
     ids = st.session_state.get("last_result_ids", [])
@@ -310,6 +436,7 @@ def main() -> None:
             f"{st.session_state.get('last_candidate_count', len(ids))} candidate(s)."
         )
     render_results_grid(ids=ids, entries=entries, scores=scores)
+    render_search_debug_panel(st.session_state.get("last_search_response"))
 
     selected_entry_id = get_selected_entry_id()
     if not selected_entry_id:

@@ -1,4 +1,8 @@
-"""Data access helpers for the Streamlit UI."""
+"""
+data.py
+
+Streamlit-facing data access helpers for MongoDB, ChromaDB, and uploaded media.
+"""
 
 import os
 from pathlib import Path
@@ -9,7 +13,7 @@ from ui.config import UPLOAD_ROOT
 from utils.chroma import (
     delete_entry_ids,
     get_chroma_client as create_chroma_client,
-    query_all_collections,
+    query_collections,
 )
 from utils.mongo import (
     delete_uploaded_documents_by_hash,
@@ -17,6 +21,7 @@ from utils.mongo import (
     get_mongo_collection,
     rename_uploaded_documents_by_hash,
 )
+from utils.retrieval import SearchManifest
 
 
 @st.cache_resource(show_spinner=False)
@@ -28,23 +33,40 @@ def clear_chroma_client_cache() -> None:
     get_chroma_client.clear()
 
 
-def get_query_results(query: str, top_n: int) -> tuple[list[str], dict[str, list]]:
+def get_query_results(
+    query: str,
+    top_n: int,
+    search_options: dict | None = None,
+    include_debug: bool = False,
+) -> tuple[list[str], dict[str, list]]:
     normalized_query = query.strip().lower()
     try:
-        ranked_queries = query_all_collections(
+        ranked_queries = query_collections(
             chroma_client=get_chroma_client(),
             query_texts=[normalized_query],
             n_results=top_n,
+            search_options=search_options,
+            include_debug=include_debug,
         )
     except Exception:
         clear_chroma_client_cache()
-        ranked_queries = query_all_collections(
+        ranked_queries = query_collections(
             chroma_client=get_chroma_client(),
             query_texts=[normalized_query],
             n_results=top_n,
+            search_options=search_options,
+            include_debug=include_debug,
         )
     result = ranked_queries.get(normalized_query) or {}
     return result.get("ids", []), result
+
+
+def manifest_source_options() -> list[tuple[str, str]]:
+    return [
+        (source_id, config.get("label") or source_id)
+        for source_id, config in SearchManifest.SOURCES.items()
+        if config.get("advanced_exposure", True)
+    ]
 
 
 def get_entries(entry_ids: list[str]) -> dict:

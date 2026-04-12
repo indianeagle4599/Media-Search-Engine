@@ -1,8 +1,8 @@
 Next Up
 
-[X] Use volatile proxy and image converters for unsupported image types
-[ ] Add search relevance thresholds to filter and display only good query matches
+[X] Add search relevance thresholds to filter and display only good query matches
 
+[ ] Create a random data downloader
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
 
@@ -10,14 +10,10 @@ Tasks
 
 [ ] File tracker improvements
     [ ] Simplify metadata schema further - condense and retain fewer metadata fields (do after adding other file support)
-    [X] Normalize and convert files and create a structured local file manager
-        [X] Create a simple, temp-file type converter (a volatile proxy), to pass directly unsupported images to the LLM.
-        [X] Allow analysis support for avif and other image file types.
     [ ] Effectively extract metadata
         [ ] Improve GPS metadata extraction in JPEGs
             [ ] Create one clean and normalised object
             [ ] Get location names and/or geocodes
-        [X] Support PNG and HEIF metadata extraction
         [ ] Support metadata extraction for other file types like TIF, SVG, etc.
     [ ] Video metadata extraction and indexing support
 [ ] Media indexer improvements
@@ -30,9 +26,9 @@ Tasks
     [ ] Add RAG-based search features.
     [ ] Add Agentic search utils for specialised searching.
 [ ] UI
-    [ ] Add collection filters once query results expose per-result collection metadata.
-    [ ] Add a query debugging panel showing per-collection scores and matched fields.
-    [ ] Add relevance feedback controls for search results to support ranking evaluation.
+    [X] Add collection filters once query results expose per-result collection metadata.
+    [X] Add a query debugging panel showing per-collection scores and matched fields.
+    [X] Add relevance feedback controls for search results to support ranking evaluation.
     [ ] Add actions to open/copy original file paths from the detail modal.
     [ ] Add a Chat option as relevant.
 [ ] Good SDE practices

@@ -1,4 +1,8 @@
-"""Reusable Streamlit UI components."""
+"""
+components.py
+
+Reusable Streamlit components for search controls, results, dialogs, and debug views.
+"""
 
 import html
 import inspect
@@ -18,11 +22,14 @@ from ui.data import (
     entry_has_description,
     entry_is_fully_indexed,
     is_uploaded_entry,
+    manifest_source_options,
     rename_uploaded_entry,
     uploaded_entry_file_hash,
 )
 from ui.formatting import get_entry_display_fields, get_summary, to_jsonable
+from ui.history import save_feedback
 from ui.media import get_thumbnail_data_uri, render_media
+from utils.retrieval import SearchManifest
 
 
 DETAIL_TRIGGER_KEY_PREFIX = "result_card_detail_trigger_"
@@ -70,6 +77,53 @@ def update_result_indexes(ids: list[str], scores: list[float]) -> None:
     }
 
 
+def source_label_map() -> dict[str, str]:
+    return {source_id: label for source_id, label in manifest_source_options()}
+
+
+def preset_focus_values(preset: str | None = None) -> dict[str, int]:
+    preset_key = str(
+        preset or st.session_state.get("search_preset") or SearchManifest.DEFAULT_PRESET
+    )
+    preset_config = SearchManifest.PRESETS.get(preset_key) or SearchManifest.PRESETS[
+        SearchManifest.DEFAULT_PRESET
+    ]
+    focus = dict(SearchManifest.DEFAULT_FOCUS)
+    focus.update(preset_config.get("focus") or {})
+    return {
+        axis: int(focus.get(axis, SearchManifest.FOCUS_AXES[axis]["default"]) or 0)
+        for axis in SearchManifest.FOCUS_AXES
+    }
+
+
+def apply_preset_focus() -> None:
+    focus = preset_focus_values()
+    st.session_state["search_focus_words"] = focus["words"]
+    st.session_state["search_focus_meaning"] = focus["meaning"]
+    st.session_state["search_focus_text"] = focus["text"]
+    st.session_state["search_focus_time"] = focus["time"]
+
+
+def reset_search_settings() -> None:
+    st.session_state["top_n"] = int(DEFAULT_TOP_N)
+    st.session_state["search_preset"] = SearchManifest.DEFAULT_PRESET
+    apply_preset_focus()
+    st.session_state["search_include_debug"] = False
+    st.session_state["search_enabled_search_types"] = list(SearchManifest.SEARCH_TYPES)
+    st.session_state["search_enabled_sources"] = [
+        source_id
+        for source_id, config in SearchManifest.SOURCES.items()
+        if config.get("enabled_by_default", True)
+    ]
+    st.session_state["search_capabilities"] = []
+    st.session_state["filter_media_type"] = "All"
+    st.session_state["filter_result_sources"] = []
+    st.session_state["filter_extensions"] = []
+    st.session_state["filter_min_score"] = 0.0
+    st.session_state["filter_date_from"] = ""
+    st.session_state["filter_date_to"] = ""
+
+
 def render_app_shell() -> None:
     st.markdown(APP_CSS, unsafe_allow_html=True)
     st.markdown(
@@ -91,9 +145,15 @@ def dialog_options(**kwargs) -> dict:
 
 
 def render_search_settings_body() -> None:
-    st.caption(
-        "Search settings are applied after retrieval. Filtered searches fetch a larger candidate pool first."
-    )
+    source_labels = source_label_map()
+    source_ids = list(source_labels)
+
+    title_col, reset_col = st.columns([4.2, 1.0])
+    with title_col:
+        st.caption("Tune retrieval first, then optionally filter the returned results.")
+    with reset_col:
+        if st.button("Reset", key="search_settings_reset", use_container_width=True):
+            reset_search_settings()
     st.session_state["top_n"] = int(
         st.number_input(
             "Number of results",
@@ -104,10 +164,81 @@ def render_search_settings_body() -> None:
             help="Number of ranked results to fetch from Chroma.",
         )
     )
+    st.select_slider(
+        "Search strictness",
+        options=list(SearchManifest.PRESETS),
+        format_func=lambda value: SearchManifest.PRESETS[value]["label"],
+        key="search_preset",
+        on_change=apply_preset_focus,
+    )
+    focus_left, focus_right = st.columns(2)
+    with focus_left:
+        st.slider(
+            "Match words",
+            min_value=0,
+            max_value=100,
+            key="search_focus_words",
+        )
+        st.slider(
+            "Visible text",
+            min_value=0,
+            max_value=100,
+            key="search_focus_text",
+        )
+    with focus_right:
+        st.slider(
+            "Match meaning",
+            min_value=0,
+            max_value=100,
+            key="search_focus_meaning",
+        )
+        st.slider(
+            "Dates and time",
+            min_value=0,
+            max_value=100,
+            key="search_focus_time",
+        )
+    st.checkbox(
+        "Include query debug data",
+        key="search_include_debug",
+        help="Return detailed source thresholds, candidate counts, and fusion metadata.",
+    )
+
+    with st.expander("Advanced retrieval", expanded=False):
+        st.multiselect(
+            "Search types",
+            list(SearchManifest.SEARCH_TYPES),
+            key="search_enabled_search_types",
+            help="Limit retrieval to selected search types.",
+        )
+        st.multiselect(
+            "Capabilities",
+            sorted(SearchManifest.CAPABILITIES),
+            format_func=lambda value: SearchManifest.CAPABILITIES[value]["label"],
+            key="search_capabilities",
+            help="Boost sources that are especially useful for these intents.",
+        )
+        st.multiselect(
+            "Sources",
+            source_ids,
+            format_func=lambda value: source_labels.get(value, value),
+            key="search_enabled_sources",
+            help="Choose which Chroma sources may participate in retrieval.",
+        )
+
+    st.divider()
+    st.markdown("**Result filters**")
     st.selectbox(
         "Media type",
         ["All", "Images", "Videos"],
         key="filter_media_type",
+    )
+    st.multiselect(
+        "Result sources",
+        source_ids,
+        format_func=lambda value: source_labels.get(value, value),
+        key="filter_result_sources",
+        help="Keep only results that were supported by at least one selected source.",
     )
     st.multiselect(
         "Extensions",
@@ -194,7 +325,9 @@ def sync_deleted_entries(entry_ids: list[str]) -> None:
     st.session_state["last_result_scores"] = [score for _, score in kept_pairs]
     st.session_state["last_result_entries"] = {
         entry_id: entry
-        for entry_id, entry in (st.session_state.get("last_result_entries") or {}).items()
+        for entry_id, entry in (
+            st.session_state.get("last_result_entries") or {}
+        ).items()
         if entry_id not in deleted_ids
     }
     update_result_indexes(
@@ -333,6 +466,9 @@ def render_indexed_detail_body(
     full_document = {"_id": entry_id, **entry}
     described = entry_has_description(entry)
     fully_indexed = entry_is_fully_indexed(entry)
+    result_item = (st.session_state.get("last_result_item_by_id") or {}).get(
+        entry_id
+    ) or {}
 
     st.subheader(file_name)
     st.caption(
@@ -369,6 +505,14 @@ def render_indexed_detail_body(
             file_path=file_path,
         )
 
+        if result_item:
+            render_feedback_section(
+                entry_id=entry_id,
+                rank=rank,
+                score=score,
+                result_item=result_item,
+            )
+
     with st.expander("Description", expanded=False):
         description = entry.get("description") or {}
         if described:
@@ -381,6 +525,20 @@ def render_indexed_detail_body(
         st.json(to_jsonable(metadata), expanded=False)
     with document_tab:
         st.json(to_jsonable(full_document), expanded=False)
+
+    if result_item:
+        with st.expander("Search provenance", expanded=False):
+            st.json(
+                to_jsonable(
+                    {
+                        "best_source_id": result_item.get("best_source_id"),
+                        "best_search_type": result_item.get("best_search_type"),
+                        "matched_fields": result_item.get("matched_fields") or [],
+                        "contributions": result_item.get("contributions") or [],
+                    }
+                ),
+                expanded=False,
+            )
 
 
 def render_detail_body(
@@ -473,19 +631,19 @@ def render_result_preview_card(
     rank_badge = (
         f'<div class="result-card__rank">#{rank}</div>' if rank is not None else ""
     )
+    title = html.escape(file_name)
+    overlay_markup = (
+        f'<div class="result-card__overlay">'
+        f'<div class="result-card__overlay-title">{title}</div>'
+        f'<div class="result-card__overlay-divider"></div>'
+        f"{overlay_details_html}</div>"
+        if overlay_details_html
+        else f'<div class="result-card__title">{title}</div>'
+    )
     card_markup = ""
     if ext in IMAGE_EXTENSIONS and path and path.is_file():
         try:
-            title = html.escape(file_name)
             preview = get_thumbnail_data_uri(str(path), path.stat().st_mtime_ns)
-            overlay_markup = (
-                f'<div class="result-card__overlay">'
-                f'<div class="result-card__overlay-title">{title}</div>'
-                f'<div class="result-card__overlay-divider"></div>'
-                f"{overlay_details_html}</div>"
-                if overlay_details_html
-                else f'<div class="result-card__title">{title}</div>'
-            )
             card_markup = (
                 f'<div class="result-card"><img src="{preview}" '
                 f'alt="{title}" title="{title}">{rank_badge}'
@@ -499,7 +657,7 @@ def render_result_preview_card(
     if not card_markup:
         card_markup = (
             f'<div class="result-card result-card--placeholder">{rank_badge}'
-            f'<div class="result-placeholder">{label}</div></div>'
+            f'<div class="result-placeholder">{label}</div>{overlay_markup}</div>'
         )
 
     st.markdown(card_markup, unsafe_allow_html=True)
@@ -518,7 +676,6 @@ def render_media_card(
     file_name: str,
     ext: str,
     *,
-    caption: str | None = None,
     rank: int | None = None,
     detail_entry_id: str | None = None,
     detail_title: str | None = None,
@@ -533,11 +690,6 @@ def render_media_card(
         detail_title=detail_title,
         overlay_details_html=overlay_details_html,
     )
-    if caption:
-        st.markdown(
-            f'<div class="result-card__caption">{html.escape(caption)}</div>',
-            unsafe_allow_html=True,
-        )
 
 
 def render_result_card(
@@ -548,6 +700,20 @@ def render_result_card(
 ) -> None:
     _, file_path, file_name, ext = get_entry_display_fields(entry_id, entry)
     score_text = "Score unavailable" if score is None else f"Score {score:.4f}"
+    result_item = (st.session_state.get("last_result_item_by_id") or {}).get(
+        entry_id
+    ) or {}
+    best_source = source_label_map().get(result_item.get("best_source_id"), "")
+    overlay_lines = []
+    if best_source:
+        overlay_lines.append(
+            f'<div class="result-card__overlay-meta">Best source: '
+            f"{html.escape(best_source)}</div>"
+        )
+    if score is not None:
+        overlay_lines.append(
+            f'<div class="result-card__overlay-meta">Score: {score:.4f}</div>'
+        )
     render_media_card(
         file_path=file_path,
         file_name=file_name,
@@ -555,6 +721,7 @@ def render_result_card(
         rank=rank,
         detail_entry_id=entry_id,
         detail_title=f"{file_name} · {score_text}",
+        overlay_details_html="".join(overlay_lines) or None,
     )
 
 
@@ -586,3 +753,106 @@ def render_results_grid(
                     rank=index + 1,
                     score=score_by_id.get(entry_id),
                 )
+
+
+def render_feedback_section(
+    entry_id: str,
+    rank: int | None,
+    score: float | None,
+    result_item: dict,
+) -> None:
+    query = str(st.session_state.get("last_query") or "").strip()
+    if not query:
+        return
+
+    st.divider()
+    st.markdown("**Relevance feedback**")
+    positive_col, negative_col = st.columns(2, gap="small")
+    if positive_col.button(
+        "Relevant",
+        key=f"feedback_positive_{entry_id}",
+        use_container_width=True,
+    ):
+        save_feedback(
+            query=query,
+            entry_id=entry_id,
+            feedback="relevant",
+            rank=rank,
+            score=score,
+            search_options=st.session_state.get("last_search_options"),
+            search_plan=st.session_state.get("last_search_plan"),
+            source_ids=result_item.get("source_ids"),
+            contributions=result_item.get("contributions"),
+        )
+        st.session_state["last_feedback_notice"] = (
+            f"Saved relevant feedback for {entry_id}"
+        )
+    if negative_col.button(
+        "Not relevant",
+        key=f"feedback_negative_{entry_id}",
+        use_container_width=True,
+    ):
+        save_feedback(
+            query=query,
+            entry_id=entry_id,
+            feedback="not_relevant",
+            rank=rank,
+            score=score,
+            search_options=st.session_state.get("last_search_options"),
+            search_plan=st.session_state.get("last_search_plan"),
+            source_ids=result_item.get("source_ids"),
+            contributions=result_item.get("contributions"),
+        )
+        st.session_state["last_feedback_notice"] = (
+            f"Saved negative feedback for {entry_id}"
+        )
+
+    notice = st.session_state.get("last_feedback_notice")
+    if notice:
+        st.caption(notice)
+
+
+def render_search_debug_panel(result_response: dict | None) -> None:
+    if not isinstance(result_response, dict) or not result_response:
+        return
+
+    items = result_response.get("items") or []
+    debug = result_response.get("debug") or {}
+    search_plan = result_response.get("search_plan") or {}
+    contribution_rows = []
+    for item in items[:10]:
+        for contribution in item.get("contributions") or []:
+            contribution_rows.append(
+                {
+                    "result_id": item.get("id"),
+                    "best_source_id": item.get("best_source_id"),
+                    "source_id": contribution.get("source_id"),
+                    "search_type": contribution.get("search_type"),
+                    "weight": contribution.get("weight"),
+                    "rank": contribution.get("rank"),
+                    "rrf_score": contribution.get("rrf_score"),
+                    "raw_score": contribution.get("raw_score"),
+                    "raw_distance": contribution.get("raw_distance"),
+                    "matched_fields": ", ".join(
+                        contribution.get("matched_fields") or []
+                    ),
+                }
+            )
+
+    with st.expander("Query debug", expanded=False):
+        st.markdown("**Resolved plan**")
+        st.json(to_jsonable(search_plan), expanded=False)
+        if debug.get("source_stats"):
+            st.markdown("**Source stats**")
+            st.dataframe(debug["source_stats"], use_container_width=True)
+        else:
+            st.info("Debug data was not collected for this search.")
+        if contribution_rows:
+            st.markdown("**Top contribution rows**")
+            st.dataframe(contribution_rows, use_container_width=True)
+        if debug.get("trace"):
+            st.markdown("**Trace**")
+            st.code(
+                "\n".join(str(line) for line in debug.get("trace") or []),
+                language="text",
+            )
