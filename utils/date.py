@@ -229,6 +229,71 @@ def resolve_file_dates(
     return resolve_dates(dates)
 
 
+def parse_embedded_datetime(raw_value) -> str | None:
+    if raw_value is None:
+        return None
+
+    raw_text = str(raw_value).strip()
+    if not raw_text:
+        return None
+
+    candidates = [
+        raw_text,
+        raw_text.replace(":", "-", 2).replace(" ", "T", 1),
+        raw_text.replace("Z", "+00:00"),
+    ]
+    for candidate in candidates:
+        formatted = format_datetime(candidate)
+        if formatted:
+            return formatted
+
+    for pattern in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y:%m:%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y:%m:%d %H:%M:%S%z",
+        "%a %d %b %Y %H:%M:%S %z",
+        "%a %b %d %H:%M:%S %Y",
+    ):
+        try:
+            parsed = datetime.strptime(raw_text, pattern)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            formatted = format_datetime(parsed.isoformat())
+            if formatted:
+                return formatted
+        except ValueError:
+            continue
+
+    return None
+
+
+def extract_text_date_items(
+    source_data: dict,
+    date_key_map: dict[str, tuple[str, int]],
+    date_items: dict | None = None,
+) -> dict:
+    date_items = dict(date_items or {})
+    date_priorities = {key: float("-inf") for key in date_items}
+
+    for raw_key, raw_value in (source_data or {}).items():
+        normalized_key = str(raw_key or "").strip().lower()
+        date_config = date_key_map.get(normalized_key)
+        if not date_config:
+            continue
+
+        normalized_date = parse_embedded_datetime(raw_value)
+        if not normalized_date:
+            continue
+
+        date_key, priority = date_config
+        if priority >= date_priorities.get(date_key, float("-inf")):
+            date_items[date_key] = normalized_date
+            date_priorities[date_key] = priority
+
+    return date_items
+
+
 # === IO EXIF Date Extraction ===
 
 

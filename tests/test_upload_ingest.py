@@ -1,102 +1,19 @@
 import copy
+import os
 import sys
 import tempfile
-import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-
-def install_external_stubs():
-    timezonefinder = types.ModuleType("timezonefinder")
-
-    class TimezoneFinder:
-        def timezone_at(self, lng, lat):
-            return None
-
-    timezonefinder.TimezoneFinder = TimezoneFinder
-    sys.modules["timezonefinder"] = timezonefinder
-
-    pil = types.ModuleType("PIL")
-    image = types.ModuleType("PIL.Image")
-    image_ops = types.ModuleType("PIL.ImageOps")
-    exif_tags = types.ModuleType("PIL.ExifTags")
-    tiff_image = types.ModuleType("PIL.TiffImagePlugin")
-
-    class IFDRational:
-        numerator = 0
-        denominator = 1
-
-    image.Image = object
-    image.LANCZOS = 1
-    exif_tags.IFD = []
-    exif_tags.TAGS = {}
-    exif_tags.GPSTAGS = {}
-    tiff_image.IFDRational = IFDRational
-    pil.Image = image
-    pil.ImageOps = image_ops
-    pil.ExifTags = exif_tags
-    sys.modules["PIL"] = pil
-    sys.modules["PIL.Image"] = image
-    sys.modules["PIL.ImageOps"] = image_ops
-    sys.modules["PIL.ExifTags"] = exif_tags
-    sys.modules["PIL.TiffImagePlugin"] = tiff_image
-
-    pymongo = types.ModuleType("pymongo")
-    pymongo.collection = types.SimpleNamespace(Collection=object)
-    pymongo.UpdateOne = object
-    sys.modules["pymongo"] = pymongo
-
-    streamlit = types.ModuleType("streamlit")
-    streamlit.session_state = {}
-    streamlit.cache_resource = lambda **kwargs: (lambda fn: fn)
-    streamlit.cache_data = lambda **kwargs: (lambda fn: fn)
-    streamlit.dialog = lambda *args, **kwargs: (lambda fn: fn)
-    streamlit.components = types.SimpleNamespace(
-        v1=types.SimpleNamespace(html=lambda *args, **kwargs: None)
-    )
-    sys.modules["streamlit"] = streamlit
-
-    dotenv = types.ModuleType("dotenv")
-    dotenv.load_dotenv = lambda *args, **kwargs: None
-    sys.modules["dotenv"] = dotenv
-
-    google = types.ModuleType("google")
-    genai = types.ModuleType("google.genai")
-
-    class Client:
-        def __init__(self, *args, **kwargs):
-            pass
-
-    class APIError(Exception):
-        def __init__(self, message="", code=None):
-            super().__init__(message)
-            self.code = code
-
-    genai.Client = Client
-    genai.errors = types.SimpleNamespace(APIError=APIError)
-    google.genai = genai
-    sys.modules["google"] = google
-    sys.modules["google.genai"] = genai
-
-    chroma = types.ModuleType("utils.chroma")
-    chroma.populate_db = Mock()
-    chroma.get_chroma_client = Mock(return_value=object())
-    chroma.delete_entry_ids = Mock()
-    sys.modules["utils.chroma"] = chroma
-
-    prompt = types.ModuleType("utils.prompt")
-    prompt.describe_image = Mock(
-        return_value={"content": {"summary": "generated description"}}
-    )
-    sys.modules["utils.prompt"] = prompt
+from tests.stub_modules import install_upload_test_stubs
 
 
-install_external_stubs()
+install_upload_test_stubs()
 
-from utils.io import index_paths
+from utils.io import fit_image_size_within_bounds, index_paths
 from utils import ingest
 from ui import app, components, data, gallery, media, upload
 
@@ -185,7 +102,76 @@ class IndexPathsTests(unittest.TestCase):
         self.assertEqual(metadata["file_path"], normalized_path)
         self.assertEqual(metadata["file_name"], "Original Upload.mov")
         self.assertEqual(metadata["ext"], "mp4")
+        self.assertEqual(metadata["mime_type"], "video/mp4")
         self.assertIn("master_date", metadata["dates"])
+
+    def test_uploaded_at_override_does_not_replace_embedded_capture_date(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stored_path = Path(tmp_dir) / "upload.jpg"
+            stored_path.write_bytes(b"image bytes")
+
+            with (
+                patch("utils.io.get_hash", return_value="hash-one"),
+                patch(
+                    "utils.io.get_embedded_metadata",
+                    return_value={
+                        "DateItems": {
+                            "DateTimeOriginal": "2021-05-01T08:15:00+00:00",
+                        }
+                    },
+                ),
+                patch(
+                    "utils.io.get_os_dates",
+                    return_value={
+                        "creation_date": "2026-04-10T12:00:00+00:00",
+                        "modification_date": "2026-04-10T12:00:00+00:00",
+                        "index_date": "2026-04-10T12:00:00+00:00",
+                    },
+                ),
+            ):
+                _, metadata = index_paths(
+                    [str(stored_path)],
+                    metadata_overrides={
+                        str(stored_path.resolve()).replace("\\", "/"): {
+                            "file_name": "Upload.jpg",
+                            "uploaded_at": "2026-04-10T12:00:00+00:00",
+                        }
+                    },
+                ).popitem()
+
+        self.assertEqual(
+            metadata["dates"]["master_date"],
+            "2021-05-01T08:15:00+00:00",
+        )
+        self.assertEqual(
+            metadata["dates"]["true_creation_date"],
+            "2021-05-01T08:15:00+00:00",
+        )
+        self.assertEqual(
+            metadata["dates"]["index_date"],
+            "2026-04-10T12:00:00+00:00",
+        )
+        self.assertEqual(metadata["dates"]["date_reliability"], "high")
+
+
+class IoResizeTests(unittest.TestCase):
+    def test_fit_image_size_within_bounds_scales_landscape_by_height_limit(self):
+        self.assertEqual(
+            fit_image_size_within_bounds(4000, 3000, 1600, 1600),
+            (1600, 1200),
+        )
+
+    def test_fit_image_size_within_bounds_scales_portrait_by_width_limit(self):
+        self.assertEqual(
+            fit_image_size_within_bounds(3000, 4000, 1600, 1600),
+            (1200, 1600),
+        )
+
+    def test_fit_image_size_within_bounds_keeps_smaller_images_unchanged(self):
+        self.assertEqual(
+            fit_image_size_within_bounds(1200, 800, 1600, 1600),
+            (1200, 800),
+        )
 
 
 class IngestTests(unittest.TestCase):
@@ -198,6 +184,24 @@ class IngestTests(unittest.TestCase):
             genai_client=object() if with_analysis else None,
             update_existing_metadata=False,
         )
+
+    def test_description_rigor_maps_to_expected_batch_sizes(self):
+        config = self.config(with_analysis=True)
+
+        config.description_rigor = "low"
+        self.assertEqual(ingest.description_batch_size(config), 20)
+
+        config.description_rigor = "medium"
+        self.assertEqual(ingest.description_batch_size(config), 10)
+
+        config.description_rigor = "high"
+        self.assertEqual(ingest.description_batch_size(config), 5)
+
+        config.description_rigor = "very high"
+        self.assertEqual(ingest.description_batch_size(config), 2)
+
+        config.description_rigor = "extreme"
+        self.assertEqual(ingest.description_batch_size(config), 1)
 
     def test_metadata_only_ingest_updates_mongo_without_description_or_chroma(self):
         config = self.config(with_analysis=False)
@@ -242,7 +246,7 @@ class IngestTests(unittest.TestCase):
                 return_value=({}, [first_entry, second_entry]),
             ),
             patch.object(ingest, "upsert_dict_objects"),
-            patch.object(ingest, "describe_image", side_effect=quota_error),
+            patch.object(ingest, "describe_image_batch", side_effect=quota_error),
             patch.object(ingest, "populate_db") as populate_chroma_mock,
         ):
             result = ingest.ingest_index(folder_dict, config)
@@ -254,6 +258,65 @@ class IngestTests(unittest.TestCase):
             "Gemini quota reached while generating descriptions.",
         )
         populate_chroma_mock.assert_not_called()
+
+    def test_missing_descriptions_are_generated_in_batches(self):
+        config = self.config(with_analysis=True)
+        config.description_rigor = "very high"
+        first_entry = ingest.entry_id_for_file("first", config)
+        second_entry = ingest.entry_id_for_file("second", config)
+        third_entry = ingest.entry_id_for_file("third", config)
+        folder_dict = {
+            "first": {"file_hash": "first", "file_path": "/uploads/first.jpg"},
+            "second": {"file_hash": "second", "file_path": "/uploads/second.jpg"},
+            "third": {"file_hash": "third", "file_path": "/uploads/third.jpg"},
+        }
+
+        def fake_describe_batch(
+            client,
+            batch_entries,
+            use_dummy_descriptions=False,
+            **kwargs,
+        ):
+            return {
+                entry["entry_id"]: {
+                    "content": {
+                        "summary": f"generated {entry['metadata']['file_hash']}"
+                    },
+                    "context": {},
+                }
+                for entry in batch_entries
+            }
+
+        with (
+            patch.object(
+                ingest,
+                "check_if_exists",
+                return_value=({}, [first_entry, second_entry, third_entry]),
+            ),
+            patch.object(ingest, "upsert_dict_objects"),
+            patch.object(
+                ingest,
+                "describe_image_batch",
+                side_effect=fake_describe_batch,
+            ) as describe_batch_mock,
+            patch.object(ingest, "populate_db") as populate_chroma_mock,
+        ):
+            result = ingest.ingest_index(folder_dict, config)
+
+        self.assertEqual(describe_batch_mock.call_count, 2)
+        first_batch_entries = describe_batch_mock.call_args_list[0].kwargs["batch_entries"]
+        second_batch_entries = describe_batch_mock.call_args_list[1].kwargs["batch_entries"]
+        self.assertEqual(len(first_batch_entries), 2)
+        self.assertEqual(len(second_batch_entries), 1)
+        self.assertEqual(
+            result.populated_keys,
+            [first_entry, second_entry, third_entry],
+        )
+        self.assertEqual(
+            result.descriptions[first_entry]["description"]["generation"]["rigor"],
+            "very high",
+        )
+        populate_chroma_mock.assert_called_once()
 
     def test_existing_description_without_chroma_marker_is_sent_to_chroma(self):
         config = self.config(with_analysis=True)
@@ -282,13 +345,47 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(result.chroma_indexed_keys, [entry_id])
         populate_chroma_mock.assert_called_once()
         self.assertFalse(
-            result.descriptions[entry_id].get("indexing", {}).get("chroma_indexed_at")
+            result.descriptions[entry_id]
+            .get("metadata", {})
+            .get("dates", {})
+            .get("chroma_indexed_at")
             is None
         )
         indexed_state = upsert_mock.call_args.kwargs["objects"][entry_id]
-        self.assertIn("indexing.chroma_indexed_at", indexed_state)
+        self.assertIn("metadata.dates.chroma_indexed_at", indexed_state)
 
     def test_existing_description_with_chroma_marker_is_not_reindexed(self):
+        config = self.config(with_analysis=True)
+        entry_id = ingest.entry_id_for_file("filehash", config)
+        folder_dict = {
+            "filehash": {
+                "file_hash": "filehash",
+                "file_path": "/uploads/hash.jpg",
+                "file_name": "Upload.jpg",
+            }
+        }
+        existing = {
+            entry_id: {
+                "description": {"content": {"summary": "done"}},
+                "metadata": {
+                    **folder_dict["filehash"].copy(),
+                    "dates": {"chroma_indexed_at": "2026-04-10T10:00:00+00:00"},
+                },
+            }
+        }
+
+        with (
+            patch.object(ingest, "check_if_exists", return_value=(existing, [])),
+            patch.object(ingest, "upsert_dict_objects") as upsert_mock,
+            patch.object(ingest, "populate_db") as populate_chroma_mock,
+        ):
+            result = ingest.ingest_index(folder_dict, config)
+
+        self.assertEqual(result.chroma_indexed_keys, [])
+        populate_chroma_mock.assert_not_called()
+        upsert_mock.assert_not_called()
+
+    def test_existing_legacy_indexing_marker_is_still_treated_as_indexed(self):
         config = self.config(with_analysis=True)
         entry_id = ingest.entry_id_for_file("filehash", config)
         folder_dict = {
@@ -332,6 +429,27 @@ class UploadFlowTests(unittest.TestCase):
             update_existing_metadata=False,
         )
 
+    def test_analysis_config_allows_dummy_mode_without_api_key(self):
+        with (
+            patch.dict(os.environ, {"MEDIA_USE_DUMMY_DESCRIPTIONS": "1"}, clear=False),
+            patch.object(upload, "get_mongo_collection", return_value=object()),
+            patch.object(upload, "get_chroma_client", return_value=object()),
+        ):
+            config = upload.build_ingest_config(run_analysis=True)
+
+        self.assertTrue(config.use_dummy_descriptions)
+        self.assertIsNone(config.genai_client)
+
+    def test_analysis_config_defaults_to_very_low_rigor(self):
+        with (
+            patch.dict(os.environ, {"MEDIA_USE_DUMMY_DESCRIPTIONS": "1"}, clear=True),
+            patch.object(upload, "get_mongo_collection", return_value=object()),
+            patch.object(upload, "get_chroma_client", return_value=object()),
+        ):
+            config = upload.build_ingest_config(run_analysis=True)
+
+        self.assertEqual(config.description_rigor, "very low")
+
     def test_classify_uploaded_files_detects_duplicates_before_commit(self):
         first_hash = upload.hash_bytes(b"first")
         second_hash = upload.hash_bytes(b"second")
@@ -353,6 +471,59 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(duplicate_count, 1)
         self.assertEqual([selection["file_hash"] for selection in selections], [first_hash, second_hash])
         self.assertEqual(selections[1]["default_action"], upload.ACTION_IGNORE)
+
+    def test_selection_rows_use_checkbox_state_for_reupload(self):
+        selections = [
+            {
+                "file_hash": "hash-one",
+                "original_filename": "Photo.jpg",
+                "existing_entry": {"_id": "existing-entry"},
+                "default_action": upload.ACTION_IGNORE,
+            }
+        ]
+
+        rows = upload.selection_rows(
+            selections,
+            {"hash-one": upload.ACTION_REUPLOAD},
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "file_hash": "hash-one",
+                    "filename": "Photo.jpg",
+                    "status": "duplicate",
+                    "existing_entry_id": "existing-entry",
+                    "re_upload": True,
+                }
+            ],
+        )
+
+    def test_update_duplicate_actions_from_rows_maps_checkbox_back_to_file_hash(self):
+        selections = [
+            {
+                "file_hash": "hash-one",
+                "original_filename": "Photo.jpg",
+                "existing_entry": {"_id": "existing-entry"},
+                "default_action": upload.ACTION_IGNORE,
+            }
+        ]
+        action_overrides = {"hash-one": upload.ACTION_IGNORE}
+
+        upload.update_duplicate_actions_from_rows(
+            [
+                {
+                    "file_hash": "hash-one",
+                    "filename": "Photo.jpg",
+                    "existing_entry_id": "existing-entry",
+                    "re_upload": True,
+                }
+            ],
+            action_overrides,
+        )
+
+        self.assertEqual(action_overrides["hash-one"], upload.ACTION_REUPLOAD)
 
     def test_duplicate_ignore_skips_db_reset_and_new_ingest(self):
         selection = {
@@ -382,6 +553,8 @@ class UploadFlowTests(unittest.TestCase):
                 "file_hash": "hash-one",
                 "file_path": "/uploads/old.jpg",
                 "file_name": "Old.jpg",
+                "dates": {"master_date": "2021-06-01T00:00:00+00:00"},
+                "embedded_metadata": {"Make": "Canon"},
             },
         }
         collection = FakeCollection([old_document])
@@ -389,7 +562,7 @@ class UploadFlowTests(unittest.TestCase):
             "file_hash": "hash-one",
             "payload": b"image-bytes",
             "original_filename": "New.jpg",
-            "existing_entry": {"_id": "old-entry"},
+            "existing_entry": copy.deepcopy(old_document),
             "default_action": upload.ACTION_IGNORE,
         }
         config = self.metadata_only_config()
@@ -415,10 +588,37 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(collection.documents, {})
         delete_chroma_mock.assert_called_once_with(chroma_client, ["old-entry"])
         _, kwargs = ingest_mock.call_args
+        self.assertIn("/20260408/", kwargs["file_paths"][0].replace("\\", "/"))
         overrides = kwargs["metadata_overrides"]
         override = next(iter(overrides.values()))
         self.assertEqual(override["file_name"], "New.jpg")
         self.assertEqual(override["uploaded_at"], seen_at.astimezone().isoformat())
+        self.assertNotIn("dates", override)
+        self.assertNotIn("embedded_metadata", override)
+
+    def test_analysis_overrides_leave_date_extraction_to_io(self):
+        entries = [
+            {
+                "_id": "pending",
+                "metadata": {
+                    "file_path": "/uploads/pending.jpg",
+                    "file_name": "Pending.jpg",
+                    "uploaded_at": "2026-04-08T12:00:00+00:00",
+                    "dates": {"master_date": "2020-08-20T00:00:00+00:00"},
+                    "embedded_metadata": {"Model": "Pixel"},
+                },
+            }
+        ]
+
+        overrides = upload.analysis_overrides(entries)
+
+        self.assertEqual(overrides["/uploads/pending.jpg"]["file_name"], "Pending.jpg")
+        self.assertEqual(
+            overrides["/uploads/pending.jpg"]["uploaded_at"],
+            "2026-04-08T12:00:00+00:00",
+        )
+        self.assertNotIn("dates", overrides["/uploads/pending.jpg"])
+        self.assertNotIn("embedded_metadata", overrides["/uploads/pending.jpg"])
 
     def test_pending_uploads_include_missing_description_and_missing_chroma(self):
         with patch.object(
@@ -452,11 +652,11 @@ class UploadFlowTests(unittest.TestCase):
                         "file_path": "/uploads/three.jpg",
                         "file_name": "three.jpg",
                         "uploaded_at": "2026-04-08T12:02:00+00:00",
+                        "dates": {
+                            "chroma_indexed_at": "2026-04-08T12:03:00+00:00"
+                        },
                     },
                     "description": {"content": {"summary": "done"}},
-                    "indexing": {
-                        "chroma_indexed_at": "2026-04-08T12:03:00+00:00"
-                    },
                 },
             ],
         ):
@@ -539,10 +739,12 @@ class GalleryTests(unittest.TestCase):
                     "file_name": "A.jpg",
                     "ext": "jpg",
                     "uploaded_at": "2026-04-10T08:00:00+00:00",
-                    "dates": {"true_creation_date": "2022-01-01T00:00:00+00:00"},
+                    "dates": {
+                        "true_creation_date": "2022-01-01T00:00:00+00:00",
+                        "chroma_indexed_at": "2026-04-10T08:05:00+00:00",
+                    },
                 },
                 "description": {"content": {"summary": "done"}},
-                "indexing": {"chroma_indexed_at": "2026-04-10T08:05:00+00:00"},
             },
             {
                 "_id": "b",
@@ -552,10 +754,12 @@ class GalleryTests(unittest.TestCase):
                     "file_name": "B.jpg",
                     "ext": "jpg",
                     "uploaded_at": "2026-04-08T08:00:00+00:00",
-                    "dates": {"true_creation_date": "2024-06-01T00:00:00+00:00"},
+                    "dates": {
+                        "true_creation_date": "2024-06-01T00:00:00+00:00",
+                        "chroma_indexed_at": "2026-04-08T08:05:00+00:00",
+                    },
                 },
                 "description": {"content": {"summary": "done"}},
-                "indexing": {"chroma_indexed_at": "2026-04-08T08:05:00+00:00"},
             },
             {
                 "_id": "c",
@@ -614,6 +818,16 @@ class DetailStateTests(unittest.TestCase):
             )
         )
         self.assertFalse(data.entry_has_description({"description": {}}))
+        self.assertTrue(
+            data.entry_is_fully_indexed(
+                {
+                    "metadata": {
+                        "dates": {"chroma_indexed_at": "2026-04-10T10:00:00+00:00"}
+                    },
+                    "description": {"content": {"summary": "done"}},
+                }
+            )
+        )
         self.assertTrue(
             data.entry_is_fully_indexed(
                 {

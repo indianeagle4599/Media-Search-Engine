@@ -4,15 +4,11 @@ chroma.py
 Contains utilities to create, update and use a chromadb for storing and querying from the descriptions of all images.
 """
 
-import chromadb, json, os, re
+import chromadb, json, os, re, multiprocessing as mp
 from datetime import datetime
 from chromadb.utils.batch_utils import create_batches
-from chromadb.utils.embedding_functions.ollama_embedding_function import (
-    OllamaEmbeddingFunction,
-)
-from chromadb.utils.embedding_functions import (
-    DefaultEmbeddingFunction,
-)
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import pandas as pd
 
@@ -129,16 +125,23 @@ collection_type_map = {
 }
 collection_type_rev_map = {v_i: k for k, v in collection_type_map.items() for v_i in v}
 
-minilm_ef = DefaultEmbeddingFunction()  # Currently "ONNXMiniLM_L6_V2" as of 23/03/2026
-ollama_ef = OllamaEmbeddingFunction(
-    model_name="mxbai-embed-large",
-)
-
-collection_ef_map = {
-    "sentence": ollama_ef,
-    "list": minilm_ef,
-    "word": minilm_ef,
+default_embedding_key = "ollama_all_minilm_l6_v2"
+sentence_embedding_key = "ollama_mxbai_embed_large"
+embedding_model_map = {
+    default_embedding_key: "all-minilm:l6-v2",
+    sentence_embedding_key: "mxbai-embed-large",
 }
+collection_embedding_key_map = {
+    "sentence": sentence_embedding_key,
+    "list": default_embedding_key,
+    "word": default_embedding_key,
+}
+process_embedding_function_cache = {}
+
+DEFAULT_EMBEDDING_PROCESS_COUNT = min(4, os.cpu_count() or 1)
+DEFAULT_EMBEDDING_PARALLEL_MIN_DOCS = 24
+DEFAULT_EMBEDDING_CHUNK_COUNT_PER_PROCESS = 2
+DEFAULT_OLLAMA_KEEP_ALIVE = "2m"
 
 
 def normalize_query_text(query_text: str):
@@ -153,14 +156,188 @@ def tokenize_document(document: str):
     text = re.sub(r"[^a-z0-9\s]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     tokens = [t for t in text.split() if len(t) > 1 and t not in STOPWORDS]
-    token_string = " ".join(tokens)
-    token_count = len(tokens)
-
-    return {
-        "tokens": tokens,
-        "token_string": token_string,
-        "token_count": token_count,
+    token_metadata = {
+        "token_string": " ".join(tokens),
+        "token_count": len(tokens),
     }
+    if tokens:
+        token_metadata["tokens"] = tokens
+    return token_metadata
+
+
+def get_embedding_function(embedding_key: str):
+    model_name = embedding_model_map.get(embedding_key)
+    if model_name is None:
+        raise KeyError(f"Unknown embedding key: {embedding_key}")
+
+    embedding_function = process_embedding_function_cache.get(embedding_key)
+    if embedding_function is not None:
+        return embedding_function
+
+    embedding_function = OllamaKeepAliveEmbeddingFunction(model_name=model_name)
+    process_embedding_function_cache[embedding_key] = embedding_function
+    return embedding_function
+
+
+def get_ollama_base_url() -> str:
+    base_url = (os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").strip()
+    if "://" not in base_url:
+        base_url = f"http://{base_url}"
+    base_url = base_url.rstrip("/")
+    if base_url.endswith("/api"):
+        base_url = base_url[: -len("/api")]
+    return base_url
+
+
+def get_ollama_keep_alive() -> str:
+    value = os.getenv("CHROMA_OLLAMA_KEEP_ALIVE")
+    if value is None or not value.strip():
+        return DEFAULT_OLLAMA_KEEP_ALIVE
+    return value.strip()
+
+
+class OllamaKeepAliveEmbeddingFunction:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        self.base_url = get_ollama_base_url()
+
+    def __call__(self, documents: list[str]) -> list[list[float]]:
+        if not documents:
+            return []
+
+        embeddings = self._post_json(
+            "/api/embed",
+            {
+                "model": self.model_name,
+                "input": documents,
+                "keep_alive": get_ollama_keep_alive(),
+            },
+        ).get("embeddings")
+        if not isinstance(embeddings, list):
+            raise RuntimeError("Ollama embeddings response did not include embeddings.")
+        return embeddings
+
+    def _post_json(self, path: str, payload: dict) -> dict:
+        request = urllib_request.Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib_error.HTTPError as exc:
+            message = exc.read().decode("utf-8", errors="replace").strip()
+            if exc.code == 404:
+                if "model" in message.lower() and "not found" in message.lower():
+                    raise RuntimeError(
+                        f"Ollama model '{self.model_name}' was not found. "
+                        f"Pull it first with `ollama pull {self.model_name}`."
+                    ) from exc
+            raise RuntimeError(
+                f"Ollama request to {self.base_url}{path} failed: "
+                f"HTTP {exc.code} {exc.reason}. {message}"
+            ) from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(
+                f"Failed to reach Ollama at {self.base_url}: {exc}"
+            ) from exc
+
+def resolve_embedding_process_count(process_count: int | None = None) -> int:
+    if process_count is not None:
+        return max(1, int(process_count))
+
+    raw_value = os.getenv("CHROMA_EMBEDDING_PROCESSES")
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_EMBEDDING_PROCESS_COUNT
+
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        return DEFAULT_EMBEDDING_PROCESS_COUNT
+
+
+def resolve_embedding_parallel_min_docs() -> int:
+    raw_value = os.getenv("CHROMA_EMBEDDING_MIN_DOCS")
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_EMBEDDING_PARALLEL_MIN_DOCS
+
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        return DEFAULT_EMBEDDING_PARALLEL_MIN_DOCS
+
+
+def resolve_embedding_batch_size(document_count: int, process_count: int) -> int:
+    raw_value = os.getenv("CHROMA_EMBEDDING_BATCH_SIZE")
+    if raw_value is not None and raw_value.strip():
+        try:
+            return max(1, int(raw_value))
+        except ValueError:
+            pass
+
+    divisor = max(1, process_count * DEFAULT_EMBEDDING_CHUNK_COUNT_PER_PROCESS)
+    return max(1, (document_count + divisor - 1) // divisor)
+
+def normalize_embedding_batch(embeddings):
+    if hasattr(embeddings, "tolist"):
+        embeddings = embeddings.tolist()
+    return [
+        embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
+        for embedding in embeddings
+    ]
+
+
+def embed_documents_with_function(
+    documents: list[str], embedding_key: str
+) -> list[list[float]]:
+    embedding_function = get_embedding_function(embedding_key)
+    return normalize_embedding_batch(embedding_function(documents))
+
+def generate_embeddings_for_key(
+    documents: list[str],
+    embedding_key: str | None,
+    process_count: int | None = None,
+) -> list[list[float]]:
+    if not documents or not embedding_key:
+        return []
+
+    process_count = resolve_embedding_process_count(process_count)
+    if process_count <= 1 or len(documents) < resolve_embedding_parallel_min_docs():
+        return embed_documents_with_function(documents, embedding_key)
+
+    batch_size = resolve_embedding_batch_size(
+        document_count=len(documents),
+        process_count=process_count,
+    )
+    document_batches = [
+        documents[i : i + batch_size] for i in range(0, len(documents), batch_size)
+    ]
+    if len(document_batches) <= 1:
+        return embed_documents_with_function(documents, embedding_key)
+
+    pool_size = min(process_count, len(document_batches))
+    try:
+        with mp.get_context("spawn").Pool(processes=pool_size) as pool:
+            embedding_batches = pool.starmap(
+                embed_documents_with_function,
+                [(batch, embedding_key) for batch in document_batches],
+            )
+    except (
+        AssertionError,
+        AttributeError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        return embed_documents_with_function(documents, embedding_key)
+
+    embeddings = []
+    for embedding_batch in embedding_batches:
+        embeddings.extend(embedding_batch)
+    return embeddings
 
 
 def get_chroma_client(
@@ -359,20 +536,42 @@ def merge_dicts(dict1: dict, dict2: dict):
     return dict1
 
 
-def upsert_batch_to_collection(collection, batches):
+def upsert_batch_to_collection(collection, batches, embedding_key: str | None = None):
+    prepared_batches = []
+    documents_to_embed = []
     for batch_ids, _, batch_metadatas, batch_documents in batches:
         if batch_metadatas is None:
             batch_metadatas = [None] * len(batch_ids)
+        else:
+            batch_metadatas = list(batch_metadatas)
         for i in range(len(batch_ids)):
             tokens_dict = tokenize_document(batch_documents[i])
             if batch_metadatas and isinstance(batch_metadatas[i], dict):
                 batch_metadatas[i].update(tokens_dict)
             else:
                 batch_metadatas[i] = tokens_dict
+        prepared_batches.append((batch_ids, batch_metadatas, batch_documents))
+        if embedding_key:
+            documents_to_embed.extend(batch_documents)
+
+    embeddings = (
+        generate_embeddings_for_key(documents_to_embed, embedding_key)
+        if embedding_key
+        else []
+    )
+    embedding_offset = 0
+    for batch_ids, batch_metadatas, batch_documents in prepared_batches:
+        upsert_kwargs = {
+            "ids": batch_ids,
+            "metadatas": batch_metadatas,
+            "documents": batch_documents,
+        }
+        if embedding_key:
+            next_offset = embedding_offset + len(batch_documents)
+            upsert_kwargs["embeddings"] = embeddings[embedding_offset:next_offset]
+            embedding_offset = next_offset
         collection.upsert(
-            ids=batch_ids,
-            metadatas=batch_metadatas,
-            documents=batch_documents,
+            **upsert_kwargs,
         )
 
 
@@ -387,18 +586,16 @@ def populate_db(
     for field_type, field_object in class_wise_db_dict.items():
         for field_name, field_dict in field_object.items():
             if field_type in ["sentence", "list", "word"]:
-                collection_kwargs = {
-                    "name": field_name,
-                    "configuration": {"hnsw": {"space": "cosine"}},
-                    "get_or_create": True,
-                    "embedding_function": collection_ef_map.get(field_type),
-                }
-                collection = chroma_client.create_collection(**collection_kwargs)
                 ids, documents = prep_dict_for_upsert(field_dict)
 
                 if not ids or not documents:
                     continue
 
+                collection = chroma_client.create_collection(
+                    name=field_name,
+                    configuration={"hnsw": {"space": "cosine"}},
+                    get_or_create=True,
+                )
                 if not overwrite:
                     existing_ids = set(
                         collection.get(ids=ids, include=[]).get("ids", [])
@@ -429,12 +626,16 @@ def populate_db(
                     batches = create_batches(
                         chroma_client, ids=ids, documents=documents
                     )
-                upsert_batch_to_collection(collection, batches)
+                upsert_batch_to_collection(
+                    collection,
+                    batches,
+                    embedding_key=collection_embedding_key_map.get(field_type),
+                )
 
 
 def chronological_search_collection(
     collection: chromadb.Collection,
-    query_texts: list[str],
+    query_specs: dict[str, dict],
     date_field: str = "master_date",
     n_results: int = 50,
 ):
@@ -449,10 +650,8 @@ def chronological_search_collection(
 
     ts_field = date_field.replace("_date", "_ts")
 
-    for query_text in query_texts:
-        date_info = extract_date_filter_from_query(query_text)
-        date_filters = date_info.get("date_filters", [])
-
+    for query_text, query_spec in query_specs.items():
+        date_filters = query_spec.get("date_filters", [])
         if not date_filters:
             continue
 
@@ -505,7 +704,7 @@ def chronological_search_collection(
 
 
 def lexical_search_collection(
-    collection: chromadb.Collection, query_dict: dict, n_results: int = 50
+    collection: chromadb.Collection, query_specs: dict[str, dict], n_results: int = 50
 ):
     query_results_dict = {
         "ids": [],
@@ -516,26 +715,20 @@ def lexical_search_collection(
         "collection": [],
     }
 
-    for query_text in query_dict.keys():
-        date_info = extract_date_filter_from_query(query_text)
-
-        clean_query_text = date_info["clean_query_text"]
-
-        tokens_dict = tokenize_document(clean_query_text)
-        query_tokens = set(tokens_dict.get("tokens", []))
-        query_token_string = tokens_dict.get("token_string", "")
-
-        token_where = None
-        if query_tokens:
-            if len(query_tokens) == 1:
-                token_where = {"tokens": {"$contains": list(query_tokens)[0]}}
-            else:
-                token_where = {
-                    "$or": [{"tokens": {"$contains": token}} for token in query_tokens]
-                }
-
-        if not token_where:
+    for query_text, query_spec in query_specs.items():
+        query_tokens = query_spec.get("tokens", [])
+        if not query_tokens:
             continue
+
+        query_token_string = query_spec.get("token_string", "")
+        if len(query_tokens) == 1:
+            token_where = {"tokens": {"$contains": query_tokens[0]}}
+        else:
+            token_where = {
+                "$or": [{"tokens": {"$contains": token}} for token in query_tokens]
+            }
+
+        query_tokens = set(query_tokens)
 
         query_result = collection.get(
             where=token_where,
@@ -614,15 +807,22 @@ def delete_entry_ids(chroma_client, entry_ids: list[str]):
 
 
 def semantic_search_collection(
-    collection: chromadb.Collection, query_dict: dict, n_results: int = 50
+    collection: chromadb.Collection,
+    query_specs: dict[str, dict],
+    embedding_key: str,
+    n_results: int = 50,
 ):
-    for query_text in query_dict:
-        if query_dict[query_text] is None:
+    final_query_texts = []
+    query_embeddings = []
+    for query_text, query_spec in query_specs.items():
+        query_embedding = (query_spec.get("embeddings") or {}).get(embedding_key)
+        if query_embedding is None:
             raise ValueError(f"Embedding for query text '{query_text}' is missing.")
+        final_query_texts.append(query_text)
+        query_embeddings.append(query_embedding)
 
-    final_query_texts = list(query_dict.keys())
     query_results = collection.query(
-        query_embeddings=list(query_dict.values()),
+        query_embeddings=query_embeddings,
         n_results=n_results,
         include=["documents", "distances"],
     )
@@ -720,57 +920,59 @@ def get_final_results(
         }
     )
 
-
-def clean_query_texts(query_texts: list):
-    cleaned = set()
-    for query_text in query_texts:
-        if isinstance(query_text, str):
-            cleaned.add(normalize_query_text(query_text))
-        elif isinstance(query_text, list):
-            cleaned.update(clean_query_texts(query_text))
-    return list(cleaned)
-
-
-def populate_query_embedding_cache(
-    query_texts: list,
-    embedding_functions: list[chromadb.utils.embedding_functions.EmbeddingFunction],
-):
-    query_embedding_cache = {}
-    for embedding_function in embedding_functions:
-        ef_name = id(embedding_function)
-        qes = embedding_function(query_texts)
-        for i, qt in enumerate(query_texts):
-            if not query_embedding_cache.get(qt, {}):
-                query_embedding_cache[qt] = {ef_name: qes[i].tolist()}
-            else:
-                query_embedding_cache[qt][ef_name] = qes[i].tolist()
-    return query_embedding_cache
-
-
 def query_all_collections(
     chroma_client: chromadb.PersistentClient, query_texts: list, n_results: int = 5
 ):
-    import time
+    query_specs = {}
+    pending_query_texts = list(reversed(query_texts))
+    while pending_query_texts:
+        query_text = pending_query_texts.pop()
+        if isinstance(query_text, list):
+            pending_query_texts.extend(reversed(query_text))
+            continue
+        if not isinstance(query_text, str):
+            continue
 
-    start = time.time()
+        normalized_query_text = normalize_query_text(query_text)
+        if normalized_query_text in query_specs:
+            continue
 
-    cleaned_query_texts = clean_query_texts(query_texts)
-    unique_embedding_functions = list(
-        {id(ef): ef for ef in collection_ef_map.values()}.values()
-    )
-    query_embedding_cache = populate_query_embedding_cache(
-        cleaned_query_texts, unique_embedding_functions
-    )
-    stop = time.time()
-    print(f"Time taken to run embedding functions: {stop - start:.2f} seconds")
+        date_info = extract_date_filter_from_query(normalized_query_text)
+        clean_query_text = date_info.get("clean_query_text", "")
+        token_metadata = tokenize_document(clean_query_text)
+        query_tokens = token_metadata.get("tokens", [])
+        query_specs[normalized_query_text] = {
+            "query_text": normalized_query_text,
+            "clean_query_text": clean_query_text,
+            "tokens": query_tokens,
+            "token_string": token_metadata.get("token_string", ""),
+            "date_filters": date_info.get("date_filters", []),
+            "is_pure_date_query": bool(date_info.get("date_filters")) and not query_tokens,
+            "embeddings": {},
+        }
 
-    query_info_map = {}
-    for qt in cleaned_query_texts:
-        query_info_map[qt] = extract_date_filter_from_query(qt)
-        query_info_map[qt]["is_pure_date_query"] = (
-            len(tokenize_document(query_info_map[qt]["clean_query_text"])["tokens"])
-            == 0
-        )
+    semantic_query_specs = {
+        query_text: query_spec
+        for query_text, query_spec in query_specs.items()
+        if query_spec.get("tokens")
+    }
+    if semantic_query_specs:
+        semantic_query_texts = list(semantic_query_specs.keys())
+        for embedding_key in dict.fromkeys(collection_embedding_key_map.values()):
+            embeddings = generate_embeddings_for_key(
+                semantic_query_texts,
+                embedding_key,
+            )
+            for i, query_text in enumerate(semantic_query_texts):
+                semantic_query_specs[query_text]["embeddings"][embedding_key] = (
+                    embeddings[i]
+                )
+
+    chronological_query_specs = {
+        query_text: query_spec
+        for query_text, query_spec in query_specs.items()
+        if query_spec.get("date_filters")
+    }
 
     combined_query_results = {
         "ids": [],
@@ -781,66 +983,69 @@ def query_all_collections(
         "collection": [],
     }
 
-    collection_names = collection_dict.keys()
-    for col_name in collection_names:
-        col_type = collection_type_rev_map.get(col_name) or "sentence"
-
-        collection_ef = collection_ef_map.get(col_type)
-        collection = chroma_client.get_collection(
-            col_name, embedding_function=collection_ef
+    existing_collection_refs = {}
+    for collection_ref in chroma_client.list_collections():
+        collection_name = (
+            collection_ref.name
+            if hasattr(collection_ref, "name")
+            else collection_ref
         )
+        if collection_name:
+            existing_collection_refs[collection_name] = collection_ref
 
-        if collection.count() == 0:
+    for col_name in collection_dict:
+        collection_ref = existing_collection_refs.get(col_name)
+        if collection_ref is None:
             continue
 
-        all_query_dict = {
-            qt: query_embedding_cache.get(qt, {}).get(id(collection_ef)) or []
-            for qt in query_embedding_cache
-        }
+        col_type = collection_type_rev_map.get(col_name) or "sentence"
+        collection_embedding_key = collection_embedding_key_map.get(col_type)
+        collection = (
+            collection_ref
+            if hasattr(collection_ref, "query")
+            else chroma_client.get_collection(col_name)
+        )
 
-        lexical_query_dict = {
-            qt: emb
-            for qt, emb in all_query_dict.items()
-            if not query_info_map.get(qt, {}).get("is_pure_date_query", False)
-        }
-        semantic_query_dict = lexical_query_dict
+        try:
+            if semantic_query_specs:
+                lexical_query_results_dict = lexical_search_collection(
+                    collection=collection,
+                    query_specs=semantic_query_specs,
+                    n_results=min(n_results * 50, 500),
+                )
+                if lexical_query_results_dict:
+                    for key in combined_query_results:
+                        combined_query_results[key].extend(
+                            lexical_query_results_dict.get(key, [])
+                        )
 
-        if lexical_query_dict:
-            lexical_query_results_dict = lexical_search_collection(
-                collection=collection,
-                query_dict=lexical_query_dict,
-                n_results=min(n_results * 50, 500),
-            )
-            if lexical_query_results_dict:
-                for key in combined_query_results:
-                    combined_query_results[key].extend(
-                        lexical_query_results_dict.get(key, [])
-                    )
+            if col_name == "context_narrative" and chronological_query_specs:
+                chrono_query_results_dict = chronological_search_collection(
+                    collection=collection,
+                    query_specs=chronological_query_specs,
+                    date_field="master_date",
+                    n_results=min(n_results * 50, 500),
+                )
+                if chrono_query_results_dict:
+                    for key in combined_query_results:
+                        combined_query_results[key].extend(
+                            chrono_query_results_dict.get(key, [])
+                        )
 
-        if col_name == "context_narrative":
-            chrono_query_results_dict = chronological_search_collection(
-                collection=collection,
-                query_texts=list(all_query_dict.keys()),
-                date_field="master_date",
-                n_results=min(n_results * 50, 500),
-            )
-            if chrono_query_results_dict:
-                for key in combined_query_results:
-                    combined_query_results[key].extend(
-                        chrono_query_results_dict.get(key, [])
-                    )
-
-        if semantic_query_dict:
-            semantic_query_results_dict = semantic_search_collection(
-                collection=collection,
-                query_dict=semantic_query_dict,
-                n_results=min(n_results * 10, 500),
-            )
-            if semantic_query_results_dict:
-                for key in combined_query_results:
-                    combined_query_results[key].extend(
-                        semantic_query_results_dict.get(key, [])
-                    )
+            if semantic_query_specs and collection_embedding_key:
+                semantic_query_results_dict = semantic_search_collection(
+                    collection=collection,
+                    query_specs=semantic_query_specs,
+                    embedding_key=collection_embedding_key,
+                    n_results=min(n_results * 10, 500),
+                )
+                if semantic_query_results_dict:
+                    for key in combined_query_results:
+                        combined_query_results[key].extend(
+                            semantic_query_results_dict.get(key, [])
+                        )
+        except Exception as exc:
+            print(f"Skipping Chroma collection '{col_name}' after query error: {exc}")
 
     combined_query_results = pd.DataFrame(combined_query_results)
 

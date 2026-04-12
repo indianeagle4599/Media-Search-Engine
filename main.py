@@ -1,35 +1,51 @@
 """CLI entrypoint for ingesting the media library into MongoDB and ChromaDB."""
 
-import os
-
-import pymongo
+import os, pymongo
 from dotenv import load_dotenv
-from google import genai
 
-from utils.chroma import get_chroma_client
-from utils.ingest import IngestConfig, ingest_folder
+from utils.chroma import get_chroma_client, populate_db
+from utils.ingest import (
+    build_ingest_config_from_env,
+    ingest_folder,
+)
 
-DEFAULT_API_NAME = "gemini"
-DEFAULT_MODEL_NAME = "gemini-2.5-flash-lite"
-DEFAULT_IMAGES_ROOT = "images_root"
+DEFAULT_IMAGES_ROOT = "images_root/test_folder"
+REPOPULATE_FLAG = "MEDIA_REPOPULATE_CHROMA"
 
 
-def build_ingest_config() -> IngestConfig:
-    return IngestConfig(
-        api_name=os.getenv("MEDIA_API_NAME", DEFAULT_API_NAME),
-        model_name=os.getenv("MEDIA_MODEL_NAME", DEFAULT_MODEL_NAME),
+def build_ingest_config():
+    return build_ingest_config_from_env(
         mongo_collection=pymongo.MongoClient(os.getenv("MONGO_URL"))[
             os.getenv("MONGO_DB_NAME")
         ][os.getenv("MONGO_COLLECTION_NAME")],
         chroma_client=get_chroma_client(path=os.getenv("CHROMA_URL")),
-        genai_client=genai.Client(api_key=os.getenv("GEM_API_KEY")),
         update_existing_metadata=True,
         verbose=True,
     )
 
 
+def repopulate_chroma_from_mongo() -> None:
+    config = build_ingest_config()
+    entries = {}
+    for document in config.mongo_collection.find({}):
+        entry_id = str(document.pop("_id"))
+        entries[entry_id] = document
+
+    populate_db(
+        entries=entries,
+        chroma_client=config.chroma_client,
+        overwrite=True,
+        verbose=config.verbose,
+    )
+    print(f"Repopulated Chroma from Mongo entries: {len(entries)}")
+
+
 def main() -> None:
     load_dotenv()
+    if os.getenv(REPOPULATE_FLAG, "").strip().lower() in {"1", "true", "yes"}:
+        repopulate_chroma_from_mongo()
+        return
+
     root_path = os.getenv("MEDIA_INDEX_ROOT", DEFAULT_IMAGES_ROOT)
     result = ingest_folder(root_path=root_path, config=build_ingest_config())
 

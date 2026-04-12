@@ -1,8 +1,6 @@
 """Reusable media ingestion orchestration."""
 
-import hashlib
-import json
-import warnings
+import hashlib, json, os, warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import perf_counter
@@ -14,7 +12,25 @@ from google import genai
 from utils.chroma import populate_db
 from utils.io import index_folder, index_paths
 from utils.mongo import check_if_exists, upsert_dict_objects
-from utils.prompt import describe_image
+from utils.prompt import (
+    build_batch_request,
+    describe_prepared_batch,
+    prepare_batch_entry,
+)
+
+
+DEFAULT_DESCRIPTION_RIGOR = "very low"
+DEFAULT_DESCRIPTION_MAX_INLINE_BYTES = 18 * 1024 * 1024
+DEFAULT_ANALYSIS_IMAGE_MAX_WIDTH = 1600
+DEFAULT_ANALYSIS_IMAGE_MAX_HEIGHT = 1600
+DESCRIPTION_BATCH_SIZE_BY_RIGOR = {
+    "very low": 50,
+    "low": 20,
+    "medium": 10,
+    "high": 5,
+    "very high": 2,
+    "extreme": 1,
+}
 
 
 @dataclass
@@ -26,6 +42,11 @@ class IngestConfig:
     genai_client: genai.Client | None = None
     update_existing_metadata: bool = True
     batch_size: int = 128
+    description_rigor: str = DEFAULT_DESCRIPTION_RIGOR
+    description_max_inline_bytes: int = DEFAULT_DESCRIPTION_MAX_INLINE_BYTES
+    analysis_image_max_width: int = DEFAULT_ANALYSIS_IMAGE_MAX_WIDTH
+    analysis_image_max_height: int = DEFAULT_ANALYSIS_IMAGE_MAX_HEIGHT
+    use_dummy_descriptions: bool = False
     verbose: bool = False
 
 
@@ -42,6 +63,68 @@ class IngestResult:
     rate_limited_keys: list[str] = field(default_factory=list)
     error_details: dict[str, dict[str, str]] = field(default_factory=dict)
     timings: dict[str, float] = field(default_factory=dict)
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def build_ingest_config_from_env(
+    *,
+    mongo_collection: pymongo.collection.Collection,
+    chroma_client: Any,
+    update_existing_metadata: bool,
+    run_analysis: bool = True,
+    default_description_rigor: str = DEFAULT_DESCRIPTION_RIGOR,
+    verbose: bool = False,
+    require_api_key: bool = False,
+) -> IngestConfig:
+    use_dummy_descriptions = run_analysis and env_flag(
+        "MEDIA_USE_DUMMY_DESCRIPTIONS",
+        default=False,
+    )
+    genai_client = None
+    if run_analysis and not use_dummy_descriptions:
+        api_key = os.getenv("GEM_API_KEY")
+        if require_api_key and not api_key:
+            raise RuntimeError("Missing required environment variable: GEM_API_KEY")
+        genai_client = genai.Client(api_key=api_key)
+
+    return IngestConfig(
+        api_name=os.getenv("MEDIA_API_NAME", "gemini"),
+        model_name=os.getenv("MEDIA_MODEL_NAME", "gemini-2.5-flash-lite"),
+        mongo_collection=mongo_collection,
+        chroma_client=chroma_client,
+        genai_client=genai_client,
+        update_existing_metadata=update_existing_metadata,
+        description_rigor=os.getenv(
+            "MEDIA_DESCRIPTION_RIGOR",
+            default_description_rigor,
+        ),
+        description_max_inline_bytes=int(
+            os.getenv(
+                "MEDIA_DESCRIPTION_MAX_INLINE_BYTES",
+                DEFAULT_DESCRIPTION_MAX_INLINE_BYTES,
+            )
+        ),
+        analysis_image_max_width=int(
+            os.getenv(
+                "MEDIA_ANALYSIS_IMAGE_MAX_WIDTH",
+                DEFAULT_ANALYSIS_IMAGE_MAX_WIDTH,
+            )
+        ),
+        analysis_image_max_height=int(
+            os.getenv(
+                "MEDIA_ANALYSIS_IMAGE_MAX_HEIGHT",
+                DEFAULT_ANALYSIS_IMAGE_MAX_HEIGHT,
+            )
+        ),
+        use_dummy_descriptions=use_dummy_descriptions,
+        verbose=verbose,
+    )
 
 
 def model_hash(api_name: str, model_name: str) -> str:
@@ -120,12 +203,213 @@ def update_metadata(
     return descriptions, list(updated_metadata_dict)
 
 
+def can_describe_missing(config: IngestConfig) -> bool:
+    return bool(config.genai_client or config.use_dummy_descriptions)
+
+
+def normalize_description_rigor(rigor: str) -> str:
+    normalized = str(rigor or DEFAULT_DESCRIPTION_RIGOR).strip().lower()
+    normalized = normalized.replace("_", " ").replace("-", " ")
+    normalized = " ".join(normalized.split())
+    if normalized in DESCRIPTION_BATCH_SIZE_BY_RIGOR:
+        return normalized
+    return DEFAULT_DESCRIPTION_RIGOR
+
+
+def description_batch_size(config: IngestConfig) -> int:
+    rigor = normalize_description_rigor(config.description_rigor)
+    return DESCRIPTION_BATCH_SIZE_BY_RIGOR[rigor]
+
+
+def iter_missing_batches(
+    descriptions: dict,
+    missing_keys: list[str],
+    config: IngestConfig,
+):
+    max_batch_size = description_batch_size(config)
+    max_inline_bytes = max(1, int(config.description_max_inline_bytes or 1))
+    batch_keys = []
+    batch_request = None
+
+    def flush_batch():
+        nonlocal batch_keys, batch_request
+        if not batch_keys:
+            return None
+        flushed_batch = {
+            "keys": batch_keys,
+            "batch_request": batch_request,
+        }
+        batch_keys = []
+        batch_request = None
+        return flushed_batch
+
+    for missing_key in missing_keys:
+        prepared_entry = prepare_batch_entry(
+            missing_key,
+            descriptions[missing_key]["metadata"],
+            config.use_dummy_descriptions,
+            analysis_image_max_width=config.analysis_image_max_width,
+            analysis_image_max_height=config.analysis_image_max_height,
+        )
+
+        if prepared_entry is None:
+            flushed_batch = flush_batch()
+            if flushed_batch:
+                yield flushed_batch
+            yield {
+                "keys": [missing_key],
+                "batch_request": None,
+                "error_reason": "Media item could not be prepared for Gemini analysis.",
+            }
+            continue
+
+        candidate_entries = (batch_request["entries"] if batch_request else []) + [
+            prepared_entry
+        ]
+        candidate_request = build_batch_request(
+            candidate_entries,
+            use_dummy_descriptions=config.use_dummy_descriptions,
+        )
+
+        if (
+            not config.use_dummy_descriptions
+            and not batch_keys
+            and candidate_request["request_bytes"] > max_inline_bytes
+        ):
+            yield {
+                "keys": [missing_key],
+                "batch_request": None,
+                "error_reason": (
+                    "Prepared Gemini inline request exceeds the configured byte limit."
+                ),
+            }
+            continue
+
+        if (
+            batch_keys
+            and candidate_request["request_bytes"] > max_inline_bytes
+        ):
+            yield flush_batch()
+            batch_request = build_batch_request(
+                [prepared_entry],
+                use_dummy_descriptions=config.use_dummy_descriptions,
+            )
+            if (
+                not config.use_dummy_descriptions
+                and batch_request["request_bytes"] > max_inline_bytes
+            ):
+                batch_request = None
+                yield {
+                    "keys": [missing_key],
+                    "batch_request": None,
+                    "error_reason": (
+                        "Prepared Gemini inline request exceeds the configured byte limit."
+                    ),
+                }
+                continue
+            batch_keys = [missing_key]
+        else:
+            batch_keys.append(missing_key)
+            batch_request = candidate_request
+
+        if len(batch_keys) >= max_batch_size:
+            yield flush_batch()
+
+    flushed_batch = flush_batch()
+    if flushed_batch:
+        yield flushed_batch
+
+
+def record_description_failures(
+    failed_keys: list[str],
+    error_details: dict[str, dict[str, str]],
+    entry_keys: list[str],
+    reason: str,
+) -> None:
+    for key in entry_keys:
+        failed_keys.append(key)
+        error_details[key] = {
+            "stage": "description",
+            "reason": reason,
+        }
+
+
+def annotate_description(description: dict, config: IngestConfig) -> dict:
+    annotated = dict(description or {})
+    generation = dict(annotated.get("generation") or {})
+    generation["rigor"] = normalize_description_rigor(config.description_rigor)
+    annotated["generation"] = generation
+    return annotated
+
+
+def apply_batch_output(
+    descriptions: dict,
+    batch_keys: list[str],
+    batch_output: dict[str, dict],
+    new_descriptions: dict,
+    populated_keys: list[str],
+    failed_keys: list[str],
+    error_details: dict[str, dict[str, str]],
+    config: IngestConfig,
+) -> None:
+    missing_reason = "No description was generated for this media item."
+    for missing_key in batch_keys:
+        description = batch_output.get(missing_key)
+        if not description:
+            record_description_failures(
+                failed_keys,
+                error_details,
+                [missing_key],
+                missing_reason,
+            )
+            continue
+
+        metadata = descriptions[missing_key]["metadata"]
+        new_descriptions[missing_key] = {
+            "description": annotate_description(description, config),
+            "metadata": metadata,
+        }
+        populated_keys.append(missing_key)
+
+
+def flush_new_descriptions(
+    new_descriptions: dict,
+    descriptions: dict,
+    config: IngestConfig,
+) -> dict:
+    if not new_descriptions:
+        return {}
+
+    upsert_dict_objects(new_descriptions, config.mongo_collection)
+    descriptions.update(new_descriptions)
+    return {}
+
+
+def mark_rate_limited(
+    missing_keys: list[str],
+    processed_count: int,
+    error_details: dict[str, dict[str, str]],
+) -> list[str]:
+    rate_limited_keys = missing_keys[processed_count:]
+    for key in rate_limited_keys:
+        error_details[key] = {
+            "stage": "description",
+            "reason": "Gemini quota reached while generating descriptions.",
+        }
+
+    warnings.warn(
+        "Received Gemini 'APIError' while running a description batch: "
+        "Quota reached. Stopping image analysis.",
+    )
+    return rate_limited_keys
+
+
 def populate_missing(
     descriptions: dict,
     missing_keys: list[str],
     config: IngestConfig,
 ) -> tuple[dict, list[str], list[str], list[str], dict[str, dict[str, str]]]:
-    if not missing_keys or not config.genai_client:
+    if not missing_keys or not can_describe_missing(config):
         return descriptions, [], [], [], {}
 
     new_descriptions = {}
@@ -134,57 +418,75 @@ def populate_missing(
     rate_limited_keys = []
     error_details: dict[str, dict[str, str]] = {}
 
-    for index, missing_key in enumerate(missing_keys):
-        metadata = descriptions[missing_key]["metadata"]
+    processed_count = 0
+    for batch_info in iter_missing_batches(descriptions, missing_keys, config):
+        batch_keys = batch_info["keys"]
+        error_reason = batch_info.get("error_reason")
+        if error_reason:
+            record_description_failures(
+                failed_keys,
+                error_details,
+                batch_keys,
+                error_reason,
+            )
+            processed_count += len(batch_keys)
+            continue
+
         try:
-            description = describe_image(config.genai_client, metadata)
-            if description:
-                new_descriptions[missing_key] = {
-                    "description": description,
-                    "metadata": metadata,
-                }
-                populated_keys.append(missing_key)
-            else:
-                failed_keys.append(missing_key)
-                error_details[missing_key] = {
-                    "stage": "description",
-                    "reason": "No description was generated for this media item.",
-                }
+            batch_output = describe_prepared_batch(
+                client=config.genai_client,
+                batch_request=batch_info["batch_request"],
+                use_dummy_descriptions=config.use_dummy_descriptions,
+            )
         except genai.errors.APIError as exc:
             if str(exc.code) == "429":
-                rate_limited_keys = missing_keys[index:]
-                for key in rate_limited_keys:
-                    error_details[key] = {
-                        "stage": "description",
-                        "reason": "Gemini quota reached while generating descriptions.",
-                    }
-                warnings.warn(
-                    "Received Gemini 'APIError' while running 'describe_image': "
-                    "Quota reached. Stopping image analysis.",
+                rate_limited_keys = mark_rate_limited(
+                    missing_keys,
+                    processed_count,
+                    error_details,
                 )
                 break
-            print("Received Gemini 'APIError' while running 'describe_image':", exc)
-            failed_keys.append(missing_key)
-            error_details[missing_key] = {
-                "stage": "description",
-                "reason": str(exc),
-            }
+            print("Received Gemini 'APIError' while running a description batch:", exc)
+            record_description_failures(
+                failed_keys,
+                error_details,
+                batch_keys,
+                str(exc),
+            )
         except Exception as exc:
-            print("Reached an Exception while running 'describe_image':", exc)
-            failed_keys.append(missing_key)
-            error_details[missing_key] = {
-                "stage": "description",
-                "reason": str(exc),
-            }
+            print("Reached an Exception while running a description batch:", exc)
+            record_description_failures(
+                failed_keys,
+                error_details,
+                batch_keys,
+                str(exc),
+            )
+        else:
+            apply_batch_output(
+                descriptions,
+                batch_keys,
+                batch_output,
+                new_descriptions,
+                populated_keys,
+                failed_keys,
+                error_details,
+                config,
+            )
+
+        processed_count += len(batch_keys)
 
         if len(new_descriptions) >= config.batch_size:
-            upsert_dict_objects(new_descriptions, config.mongo_collection)
-            descriptions.update(new_descriptions)
-            new_descriptions = {}
+            new_descriptions = flush_new_descriptions(
+                new_descriptions,
+                descriptions,
+                config,
+            )
 
-    if new_descriptions:
-        upsert_dict_objects(new_descriptions, config.mongo_collection)
-        descriptions.update(new_descriptions)
+    new_descriptions = flush_new_descriptions(
+        new_descriptions,
+        descriptions,
+        config,
+    )
 
     if config.verbose:
         print(json.dumps(descriptions, indent=2))
@@ -203,9 +505,20 @@ def has_description(entry: dict) -> bool:
     return bool(description and description.get("content"))
 
 
-def has_chroma_index(entry: dict) -> bool:
+def get_chroma_indexed_at(entry: dict) -> str:
+    metadata = entry.get("metadata") or {}
+    dates = metadata.get("dates") or {}
+    value = dates.get("chroma_indexed_at")
+    if value:
+        return str(value)
+
     indexing = entry.get("indexing") or {}
-    return bool(indexing.get("chroma_indexed_at"))
+    value = indexing.get("chroma_indexed_at")
+    return str(value or "")
+
+
+def has_chroma_index(entry: dict) -> bool:
+    return bool(get_chroma_indexed_at(entry))
 
 
 def mark_chroma_indexed(entry_ids: list[str], config: IngestConfig) -> str | None:
@@ -215,7 +528,7 @@ def mark_chroma_indexed(entry_ids: list[str], config: IngestConfig) -> str | Non
     indexed_at = datetime.now(timezone.utc).isoformat()
     upsert_dict_objects(
         objects={
-            entry_id: {"indexing.chroma_indexed_at": indexed_at}
+            entry_id: {"metadata.dates.chroma_indexed_at": indexed_at}
             for entry_id in entry_ids
         },
         collection=config.mongo_collection,
@@ -268,9 +581,7 @@ def ingest_index(
 
     if config.update_existing_metadata:
         chroma_entries = {
-            key: entry
-            for key, entry in descriptions.items()
-            if has_description(entry)
+            key: entry for key, entry in descriptions.items() if has_description(entry)
         }
     else:
         chroma_entries = {
@@ -290,9 +601,9 @@ def ingest_index(
         indexed_at = mark_chroma_indexed(list(chroma_entries), config)
         if indexed_at:
             for key in chroma_entries:
-                descriptions.setdefault(key, {}).setdefault("indexing", {})[
-                    "chroma_indexed_at"
-                ] = indexed_at
+                descriptions.setdefault(key, {}).setdefault("metadata", {}).setdefault(
+                    "dates", {}
+                )["chroma_indexed_at"] = indexed_at
         chroma_indexed_keys = list(chroma_entries)
     timings["populate_chroma"] = perf_counter() - start
 

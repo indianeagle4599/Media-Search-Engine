@@ -1,11 +1,7 @@
 Next Up
 
-[X] Update post-VLM metadata schema to use new, canonical dates.
-[X] Add Mongo update code to update metadata even if descriptions are not newly generated.
-[X] Create a mongo "test" data retreiver to quickly get random datapoints.
-
-[ ] Create a date-based retrieval function.
-[ ] Add keyword-matching and BM-25 searching options and add match-based score to current method.
+[X] Use volatile proxy and image converters for unsupported image types
+[ ] Add search relevance thresholds to filter and display only good query matches
 
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
@@ -14,45 +10,31 @@ Tasks
 
 [ ] File tracker improvements
     [ ] Simplify metadata schema further - condense and retain fewer metadata fields (do after adding other file support)
-    [ ] Normalize and convert files and create a structured local file manager
-        [ ] Create a simple, temp-file type converter (a volatile proxy), to pass directly unsupported images to the LLM.
-        [ ] Allow analysis support for avif and other image file types.
-        [ ] File renaming as necessary
+    [X] Normalize and convert files and create a structured local file manager
+        [X] Create a simple, temp-file type converter (a volatile proxy), to pass directly unsupported images to the LLM.
+        [X] Allow analysis support for avif and other image file types.
     [ ] Effectively extract metadata
         [ ] Improve GPS metadata extraction in JPEGs
             [ ] Create one clean and normalised object
             [ ] Get location names and/or geocodes
-        [ ] Support PNG and HEIF metadata extraction
+        [X] Support PNG and HEIF metadata extraction
         [ ] Support metadata extraction for other file types like TIF, SVG, etc.
     [ ] Video metadata extraction and indexing support
 [ ] Media indexer improvements
-    [X] Move ingestion orchestration into reusable ingest utilities.
     [ ] VLM
-        [ ] Create a multi-API setup to leverage free tier extractions
-        [ ] Check options for batch predictions
         [ ] Explore lighter models
     [ ] Use pydantic for maintaining standard schema
     [ ] ChromaDB
-        [ ] Explore optimizations like multi-processing, hybrid-search, caching, etc.
-        [X] Allow simple retrieval options like dates, standard text matching, etc.
-            [X] Lexical matching
-            [X] Date-search
-                [X] Multi-filter ISO/semantic date parser
-                [X] Chronological search with RRF pre-aggregation
-                [X] Shared date utility module for IO/retrieval/Chroma date code
         [ ] Create retrieval evaluation setup
             [ ] Create a random data downloader
     [ ] Add RAG-based search features.
     [ ] Add Agentic search utils for specialised searching.
 [ ] UI
-    [X] Polish detail modal, fullscreen media view, and gallery card UX.
     [ ] Add collection filters once query results expose per-result collection metadata.
     [ ] Add a query debugging panel showing per-collection scores and matched fields.
     [ ] Add relevance feedback controls for search results to support ranking evaluation.
     [ ] Add actions to open/copy original file paths from the detail modal.
     [ ] Add a Chat option as relevant.
 [ ] Good SDE practices
-    [ ] Leverage branches for feature development.
     [ ] Setup Pytest and design test cases for various functions.
-    [X] Add focused upload and ingestion unit tests.
     [ ] Add docstrings

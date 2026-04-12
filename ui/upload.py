@@ -1,7 +1,6 @@
 """Upload page for metadata-first media storage and pending analysis."""
 
 import hashlib
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,23 +8,27 @@ import streamlit as st
 
 from ui.config import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ui.data import (
-    dedupe_entries_by_hash,
+    clear_uploaded_entries_cache,
+    clear_chroma_client_cache,
+    delete_uploaded_entry,
     entry_is_fully_indexed,
     get_chroma_client,
     get_entry_creation_date,
     get_entry_upload_date,
-    get_mongo_collection,
     get_upload_root,
     get_uploaded_entry_by_hash,
     list_uploaded_entries,
     normalize_path,
 )
-from utils.chroma import delete_entry_ids
-from utils.ingest import IngestConfig, entry_id_for_file, ingest_files
+from utils.mongo import get_mongo_collection
+from utils.ingest import (
+    DEFAULT_DESCRIPTION_RIGOR,
+    build_ingest_config_from_env,
+    entry_id_for_file,
+    ingest_files,
+)
 
-
-DEFAULT_API_NAME = "gemini"
-DEFAULT_MODEL_NAME = "gemini-2.5-flash-lite"
+DEFAULT_UPLOAD_DESCRIPTION_RIGOR = "very low"
 ACTION_IGNORE = "ignore"
 ACTION_REUPLOAD = "reupload"
 STATUS_STORED = "stored"
@@ -53,16 +56,21 @@ def hash_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def upload_storage_path(file_hash: str, ext: str) -> Path:
+def upload_folder_name(uploaded_at: datetime) -> str:
+    return uploaded_at.astimezone().strftime("%Y%m%d")
+
+
+def upload_storage_path(file_hash: str, ext: str, uploaded_at: datetime) -> Path:
     root = get_upload_root()
     root.mkdir(parents=True, exist_ok=True)
 
-    existing = sorted(root.glob(f"{file_hash}.*"))
+    existing = sorted(root.rglob(f"{file_hash}.*"))
     if existing:
         return existing[0].resolve()
 
+    dated_root = root / upload_folder_name(uploaded_at)
     stored_name = f"{file_hash}.{ext}" if ext else file_hash
-    return (root / stored_name).resolve()
+    return (dated_root / stored_name).resolve()
 
 
 def ensure_stored_file(path: Path, payload: bytes) -> None:
@@ -71,24 +79,16 @@ def ensure_stored_file(path: Path, payload: bytes) -> None:
         path.write_bytes(payload)
 
 
-def build_ingest_config(run_analysis: bool) -> IngestConfig:
-    genai_client = None
-    if run_analysis:
-        api_key = os.getenv("GEM_API_KEY")
-        if not api_key:
-            raise RuntimeError("Missing required environment variable: GEM_API_KEY")
-
-        from google import genai
-
-        genai_client = genai.Client(api_key=api_key)
-
-    return IngestConfig(
-        api_name=os.getenv("MEDIA_API_NAME", DEFAULT_API_NAME),
-        model_name=os.getenv("MEDIA_MODEL_NAME", DEFAULT_MODEL_NAME),
+def build_ingest_config(run_analysis: bool):
+    return build_ingest_config_from_env(
         mongo_collection=get_mongo_collection(),
         chroma_client=get_chroma_client() if run_analysis else None,
-        genai_client=genai_client,
         update_existing_metadata=False,
+        run_analysis=run_analysis,
+        default_description_rigor=(
+            DEFAULT_UPLOAD_DESCRIPTION_RIGOR if run_analysis else DEFAULT_DESCRIPTION_RIGOR
+        ),
+        require_api_key=run_analysis,
     )
 
 
@@ -139,20 +139,6 @@ def selection_action(selection: dict, action_overrides: dict[str, str] | None = 
     return overrides.get(selection["file_hash"], selection["default_action"])
 
 
-def delete_existing_upload(file_hash: str) -> list[str]:
-    collection = get_mongo_collection()
-    entry_ids = [
-        str(document["_id"])
-        for document in collection.find({"metadata.file_hash": file_hash})
-    ]
-    if not entry_ids:
-        return []
-
-    delete_entry_ids(get_chroma_client(), entry_ids)
-    collection.delete_many({"_id": {"$in": entry_ids}})
-    return entry_ids
-
-
 def store_selected_uploads(
     selections: list[dict],
     action_overrides: dict[str, str] | None = None,
@@ -164,6 +150,7 @@ def store_selected_uploads(
     overrides: dict[str, dict] = {}
     stored_items = []
     results = []
+    mutated_existing_uploads = False
 
     for selection in selections:
         file_hash = selection["file_hash"]
@@ -183,10 +170,11 @@ def store_selected_uploads(
             continue
 
         if existing_entry:
-            delete_existing_upload(file_hash)
+            delete_uploaded_entry(file_hash, clear_cache=False)
+            mutated_existing_uploads = True
 
         ext = Path(selection["original_filename"]).suffix.lstrip(".").lower()
-        stored_path = upload_storage_path(file_hash, ext)
+        stored_path = upload_storage_path(file_hash, ext, seen_at)
         ensure_stored_file(stored_path, selection["payload"])
         normalized_path = normalize_path(stored_path)
         file_paths.append(normalized_path)
@@ -202,13 +190,20 @@ def store_selected_uploads(
         )
 
     if not file_paths:
+        if mutated_existing_uploads:
+            clear_uploaded_entries_cache()
         return results
 
-    ingest_files(
-        file_paths=file_paths,
-        config=config,
-        metadata_overrides=overrides,
-    )
+    try:
+        ingest_files(
+            file_paths=file_paths,
+            config=config,
+            metadata_overrides=overrides,
+        )
+    except Exception:
+        clear_uploaded_entries_cache()
+        raise
+    clear_uploaded_entries_cache()
     for item in stored_items:
         results.append(
             {
@@ -222,10 +217,11 @@ def store_selected_uploads(
     return results
 
 
-def pending_upload_entries() -> list[dict]:
+def pending_upload_entries(entries: list[dict] | None = None) -> list[dict]:
+    source_entries = list_uploaded_entries() if entries is None else entries
     entries = [
         entry
-        for entry in dedupe_entries_by_hash(list_uploaded_entries())
+        for entry in source_entries
         if not entry_is_fully_indexed(entry)
     ]
     return sorted(entries, key=lambda entry: get_entry_upload_date(entry))
@@ -248,20 +244,24 @@ def analysis_overrides(entries: list[dict]) -> dict[str, dict]:
     return overrides
 
 
-def analyze_pending_uploads() -> list[dict]:
-    pending_entries = pending_upload_entries()
+def analyze_pending_uploads(pending_entries: list[dict]) -> list[dict]:
     if not pending_entries:
         return []
 
+    clear_chroma_client_cache()
     config = build_ingest_config(run_analysis=True)
-    result = ingest_files(
-        file_paths=[
-            str((entry.get("metadata") or {}).get("file_path") or "")
-            for entry in pending_entries
-        ],
-        config=config,
-        metadata_overrides=analysis_overrides(pending_entries),
-    )
+    try:
+        result = ingest_files(
+            file_paths=[
+                str((entry.get("metadata") or {}).get("file_path") or "")
+                for entry in pending_entries
+            ],
+            config=config,
+            metadata_overrides=analysis_overrides(pending_entries),
+        )
+    finally:
+        clear_chroma_client_cache()
+        clear_uploaded_entries_cache()
 
     rows = []
     indexed_keys = set(result.chroma_indexed_keys)
@@ -311,15 +311,37 @@ def selection_rows(
         action = selection_action(selection, action_overrides)
         rows.append(
             {
+                "file_hash": selection["file_hash"],
                 "filename": selection["original_filename"],
                 "status": "duplicate" if existing_entry else "new",
-                "action": action or "store",
                 "existing_entry_id": str(existing_entry.get("_id") or "")
                 if existing_entry
                 else "",
+                "re_upload": bool(existing_entry and action == ACTION_REUPLOAD),
             }
         )
     return rows
+
+
+def update_duplicate_actions_from_rows(
+    edited_rows: list[dict],
+    action_overrides: dict[str, str],
+) -> None:
+    duplicate_hashes = {
+        str(row.get("file_hash") or "")
+        for row in edited_rows or []
+        if row.get("existing_entry_id")
+    }
+    for file_hash in duplicate_hashes:
+        action_overrides.pop(file_hash, None)
+
+    for row in edited_rows or []:
+        file_hash = str(row.get("file_hash") or "")
+        if not file_hash or not row.get("existing_entry_id"):
+            continue
+        action_overrides[file_hash] = (
+            ACTION_REUPLOAD if bool(row.get("re_upload")) else ACTION_IGNORE
+        )
 
 
 def results_table(rows: list[dict]) -> list[dict]:
@@ -349,30 +371,48 @@ def pending_table(entries: list[dict]) -> list[dict]:
     return rows
 
 
-def render_duplicate_controls(
+def render_selection_table(
     selections: list[dict],
     action_overrides: dict[str, str],
 ) -> None:
-    duplicates = [selection for selection in selections if selection.get("existing_entry")]
-    if not duplicates:
+    rows = selection_rows(selections, action_overrides)
+    if not rows:
         return
 
-    st.markdown("**Duplicate handling**")
-    st.caption(
-        "Duplicates are ignored by default. Choose Re-upload only when you want to replace the old searchable record with a fresh metadata-first upload."
+    if any(row["status"] == "duplicate" for row in rows):
+        st.markdown("**Upload selection**")
+        st.caption(
+            "Duplicates are ignored by default. Tick `re_upload` only when you want to replace the old searchable record with a fresh metadata-first upload."
+        )
+        duplicate_hashes = [
+            str(row["file_hash"] or "")
+            for row in rows
+            if row["status"] == "duplicate" and row.get("file_hash")
+        ]
+        if duplicate_hashes and st.button(
+            "Select all duplicates for re-upload",
+            key="upload_select_all_duplicates",
+        ):
+            for file_hash in duplicate_hashes:
+                action_overrides[file_hash] = ACTION_REUPLOAD
+            st.rerun()
+        rows = selection_rows(selections, action_overrides)
+        edited_rows = st.data_editor(
+            rows,
+            hide_index=True,
+            disabled=["filename", "status", "existing_entry_id"],
+            column_order=["filename", "status", "existing_entry_id", "re_upload"],
+            key="upload_selection_table",
+        )
+        if hasattr(edited_rows, "to_dict"):
+            edited_rows = edited_rows.to_dict("records")
+        update_duplicate_actions_from_rows(edited_rows, action_overrides)
+        return
+
+    st.dataframe(
+        [{"filename": row["filename"], "status": row["status"]} for row in rows],
+        hide_index=True,
     )
-    for selection in duplicates:
-        file_hash = selection["file_hash"]
-        current_action = action_overrides.get(file_hash, ACTION_IGNORE)
-        label = st.selectbox(
-            selection["original_filename"],
-            ["Ignore duplicate", "Re-upload"],
-            index=0 if current_action == ACTION_IGNORE else 1,
-            key=f"duplicate_action_{file_hash}",
-        )
-        action_overrides[file_hash] = (
-            ACTION_REUPLOAD if label == "Re-upload" else ACTION_IGNORE
-        )
 
 
 def render_upload_page() -> None:
@@ -389,14 +429,10 @@ def render_upload_page() -> None:
     )
     selections, duplicate_in_selection_count = classify_uploaded_files(uploaded_files)
     action_overrides = st.session_state.setdefault("upload_duplicate_actions", {})
-    pending_entries = pending_upload_entries()
+    pending_entries = pending_upload_entries(list_uploaded_entries())
 
     if selections:
-        render_duplicate_controls(selections, action_overrides)
-        st.dataframe(
-            selection_rows(selections, action_overrides),
-            hide_index=True,
-        )
+        render_selection_table(selections, action_overrides)
         if duplicate_in_selection_count:
             st.caption(
                 f"Ignoring {duplicate_in_selection_count} repeated file(s) in the current selection."
@@ -414,6 +450,7 @@ def render_upload_page() -> None:
                         selections=selections,
                         action_overrides=action_overrides,
                     )
+                pending_entries = pending_upload_entries(list_uploaded_entries())
                 st.session_state["upload_store_results"] = results
                 stored_count = sum(
                     1
@@ -437,7 +474,8 @@ def render_upload_page() -> None:
         ):
             try:
                 with st.spinner("Analyzing pending uploads..."):
-                    results = analyze_pending_uploads()
+                    results = analyze_pending_uploads(pending_entries)
+                pending_entries = pending_upload_entries(list_uploaded_entries())
                 st.session_state["upload_analysis_results"] = results
                 indexed_count = sum(1 for row in results if row["status"] == STATUS_INDEXED)
                 if indexed_count:
@@ -453,14 +491,13 @@ def render_upload_page() -> None:
         st.markdown("**Store results**")
         st.dataframe(results_table(stored_results), hide_index=True)
 
-    latest_pending = pending_upload_entries()
     st.markdown("**Pending analysis**")
-    if latest_pending:
+    if pending_entries:
         st.caption(
-            f"{len(latest_pending)} uploaded file(s) are stored in MongoDB but still missing generated descriptions or Chroma indexing."
+            f"{len(pending_entries)} uploaded file(s) are stored in MongoDB but still missing generated descriptions or Chroma indexing."
         )
         st.dataframe(
-            pending_table(latest_pending),
+            pending_table(pending_entries),
             hide_index=True,
         )
     else:

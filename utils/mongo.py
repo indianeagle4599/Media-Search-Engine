@@ -5,6 +5,43 @@ Contains utilities and adapters to connect to, search in and update mongoDB coll
 """
 
 import os, pymongo
+from functools import lru_cache
+
+DEFAULT_SEARCH_HISTORY_COLLECTION = "media_search_history"
+
+
+def get_required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+@lru_cache(maxsize=1)
+def get_mongo_database() -> pymongo.database.Database:
+    client = pymongo.MongoClient(get_required_env("MONGO_URL"))
+    return client[get_required_env("MONGO_DB_NAME")]
+
+
+@lru_cache(maxsize=None)
+def get_mongo_collection(
+    collection_name: str | None = None,
+) -> pymongo.collection.Collection:
+    return get_mongo_database()[
+        collection_name or get_required_env("MONGO_COLLECTION_NAME")
+    ]
+
+
+@lru_cache(maxsize=1)
+def get_search_history_collection(
+    default_name: str = DEFAULT_SEARCH_HISTORY_COLLECTION,
+) -> pymongo.collection.Collection:
+    collection = get_mongo_collection(
+        os.getenv("MEDIA_SEARCH_HISTORY_COLLECTION", default_name)
+    )
+    collection.create_index([("history_user", 1), ("created_at", -1)])
+    collection.create_index([("history_user", 1), ("search_key", 1)], unique=True)
+    return collection
 
 
 def find_dict_objects(
@@ -17,9 +54,9 @@ def find_dict_objects(
     elif isinstance(objects, list):
         object_keys = objects
     elif isinstance(objects, str):
-        object_keys = [
-            objects,
-        ]
+        object_keys = [objects]
+    else:
+        raise TypeError("objects must be a dict, list, or string")
 
     n = 0
     result_dict = {}
@@ -40,10 +77,12 @@ def upsert_dict_objects(
 ) -> None:
     updates = []
     for key, value in objects.items():
-        filter_dict = {"_id": key}
-        update_dict = {"$set": value}
         updates.append(
-            pymongo.UpdateOne(filter=filter_dict, update=update_dict, upsert=True)
+            pymongo.UpdateOne(
+                filter={"_id": key},
+                update={"$set": value},
+                upsert=True,
+            )
         )
         if len(updates) >= batch_size:
             collection.bulk_write(updates)
@@ -56,9 +95,7 @@ def upsert_dict_objects(
 def check_if_exists(
     keys_dict: dict,
     collection: pymongo.collection.Collection,
-    required_fields: (
-        list[str] | None
-    ) = None,  # Pass nested fields as dot paths, e.g. "description.content"
+    required_fields: list[str] | None = None,
 ):
     ids = list(keys_dict)
     base_filter = {"_id": {"$in": ids}}
@@ -93,41 +130,46 @@ def get_random_objects(
     return final_result
 
 
-if __name__ == "__main__":
-    import random, json
+def find_uploaded_documents_by_hash(
+    file_hash: str,
+    projection: dict | None = None,
+) -> list[dict]:
+    cleaned_hash = str(file_hash or "").strip()
+    if not cleaned_hash:
+        return []
+    return list(
+        get_mongo_collection().find({"metadata.file_hash": cleaned_hash}, projection)
+    )
 
-    url = "mongodb://localhost:27017"
-    collection = pymongo.MongoClient(url)["test_db"]["test"]
 
-    print("\nUpserting objects:")
-    dicts = {
-        "key_one": {
-            "name": "object_one",
-            "description": "The first object.",
-        },
-        "key_two": {
-            "name": "object_two",
-            "description": "The second object.",
-        },
-        "key_three": {
-            "name": "object_three",
-            "description": "The third object.",
-        },
-        "key_four": {
-            "name": "object_four",
-            "description": "The fourth object.",
-        },
-        "key_five": {
-            "name": "object_five",
-            "description": "The fifth object.",
-        },
-    }
-    upsert_dict_objects(objects=dicts, collection=collection)
+def rename_uploaded_documents_by_hash(file_hash: str, file_name: str) -> list[str]:
+    documents = find_uploaded_documents_by_hash(file_hash, {"_id": 1})
+    if not documents:
+        raise ValueError("Uploaded file was not found in MongoDB.")
 
-    k = 3
-    keys = random.choices(list(dicts.keys()), k=k)
-    print(f"Retrieving {k} objects by key:")
-    print(json.dumps(find_dict_objects(objects=keys, collection=collection), indent=2))
+    mongo_ids = [document["_id"] for document in documents]
+    get_mongo_collection().update_many(
+        {"_id": {"$in": mongo_ids}},
+        {"$set": {"metadata.file_name": file_name}},
+    )
+    return [str(entry_id) for entry_id in mongo_ids]
 
-    print(f"Retrieving {k} objects randomly:")
-    print(json.dumps(get_random_objects(collection=collection, n=k), indent=2))
+
+def delete_uploaded_documents_by_hash(file_hash: str) -> tuple[list[str], list[str]]:
+    documents = find_uploaded_documents_by_hash(
+        file_hash,
+        {"_id": 1, "metadata.file_path": 1},
+    )
+    if not documents:
+        return [], []
+
+    mongo_ids = [document["_id"] for document in documents]
+    file_paths = sorted(
+        {
+            str((document.get("metadata") or {}).get("file_path") or "")
+            for document in documents
+            if str((document.get("metadata") or {}).get("file_path") or "")
+        }
+    )
+    get_mongo_collection().delete_many({"_id": {"$in": mongo_ids}})
+    return [str(entry_id) for entry_id in mongo_ids], file_paths

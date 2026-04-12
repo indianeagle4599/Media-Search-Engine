@@ -6,57 +6,43 @@ from pathlib import Path
 import streamlit as st
 
 from ui.config import UPLOAD_ROOT
-
-
-def get_required_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
-
-
-@st.cache_resource(show_spinner=False)
-def get_mongo_database():
-    import pymongo
-
-    client = pymongo.MongoClient(get_required_env("MONGO_URL"))
-    return client[get_required_env("MONGO_DB_NAME")]
-
-
-def get_mongo_collection():
-    return get_mongo_database()[get_required_env("MONGO_COLLECTION_NAME")]
-
-
-@st.cache_resource(show_spinner=False)
-def get_search_history_collection():
-    from ui.config import SEARCH_HISTORY_COLLECTION
-
-    collection_name = os.getenv(
-        "MEDIA_SEARCH_HISTORY_COLLECTION",
-        SEARCH_HISTORY_COLLECTION,
-    )
-    collection = get_mongo_database()[collection_name]
-    collection.create_index([("history_user", 1), ("created_at", -1)])
-    collection.create_index([("history_user", 1), ("search_key", 1)], unique=True)
-    return collection
+from utils.chroma import (
+    delete_entry_ids,
+    get_chroma_client as create_chroma_client,
+    query_all_collections,
+)
+from utils.mongo import (
+    delete_uploaded_documents_by_hash,
+    find_dict_objects,
+    get_mongo_collection,
+    rename_uploaded_documents_by_hash,
+)
 
 
 @st.cache_resource(show_spinner=False)
 def get_chroma_client():
-    from utils.chroma import get_chroma_client as create_chroma_client
-
     return create_chroma_client(path=os.getenv("CHROMA_URL"))
 
 
-def get_query_results(query: str, top_n: int) -> tuple[list[str], dict[str, list]]:
-    from utils.chroma import query_all_collections
+def clear_chroma_client_cache() -> None:
+    get_chroma_client.clear()
 
+
+def get_query_results(query: str, top_n: int) -> tuple[list[str], dict[str, list]]:
     normalized_query = query.strip().lower()
-    ranked_queries = query_all_collections(
-        chroma_client=get_chroma_client(),
-        query_texts=[normalized_query],
-        n_results=top_n,
-    )
+    try:
+        ranked_queries = query_all_collections(
+            chroma_client=get_chroma_client(),
+            query_texts=[normalized_query],
+            n_results=top_n,
+        )
+    except Exception:
+        clear_chroma_client_cache()
+        ranked_queries = query_all_collections(
+            chroma_client=get_chroma_client(),
+            query_texts=[normalized_query],
+            n_results=top_n,
+        )
     result = ranked_queries.get(normalized_query) or {}
     return result.get("ids", []), result
 
@@ -64,9 +50,6 @@ def get_query_results(query: str, top_n: int) -> tuple[list[str], dict[str, list
 def get_entries(entry_ids: list[str]) -> dict:
     if not entry_ids:
         return {}
-
-    from utils.mongo import find_dict_objects
-
     return find_dict_objects(entry_ids, get_mongo_collection())
 
 
@@ -78,12 +61,27 @@ def normalize_path(path: str | Path) -> str:
     return str(Path(path).resolve()).replace("\\", "/")
 
 
+def uploaded_entry_file_hash(entry: dict) -> str:
+    return str((entry.get("metadata") or {}).get("file_hash") or "")
+
+
 def entry_has_description(entry: dict) -> bool:
     return bool((entry.get("description") or {}).get("content"))
 
 
+def get_entry_chroma_index_date(entry: dict) -> str:
+    metadata = entry.get("metadata") or {}
+    dates = metadata.get("dates") or {}
+    value = dates.get("chroma_indexed_at")
+    if value:
+        return str(value)
+
+    indexing = entry.get("indexing") or {}
+    return str(indexing.get("chroma_indexed_at") or "")
+
+
 def entry_has_chroma_index(entry: dict) -> bool:
-    return bool((entry.get("indexing") or {}).get("chroma_indexed_at"))
+    return bool(get_entry_chroma_index_date(entry))
 
 
 def entry_is_fully_indexed(entry: dict) -> bool:
@@ -110,14 +108,6 @@ def is_uploaded_entry(entry: dict) -> bool:
 
 def normalize_entry(entry: dict) -> dict:
     return {**entry, "_id": str(entry["_id"])}
-
-
-def list_uploaded_entries() -> list[dict]:
-    return [
-        normalize_entry(entry)
-        for entry in get_mongo_collection().find({})
-        if is_uploaded_entry(entry)
-    ]
 
 
 def dedupe_entries_by_hash(entries: list[dict]) -> list[dict]:
@@ -147,10 +137,82 @@ def dedupe_entries_by_hash(entries: list[dict]) -> list[dict]:
     return list(chosen.values())
 
 
-def get_uploaded_entry_by_hash(file_hash: str) -> dict | None:
-    matches = [
+@st.cache_data(show_spinner=False, ttl=5, max_entries=1)
+def get_uploaded_entries_snapshot() -> dict[str, object]:
+    entries = [
         normalize_entry(entry)
-        for entry in get_mongo_collection().find({"metadata.file_hash": file_hash})
+        for entry in get_mongo_collection().find({})
+        if is_uploaded_entry(entry)
     ]
-    deduped = dedupe_entries_by_hash(matches)
-    return deduped[0] if deduped else None
+    deduped_entries = dedupe_entries_by_hash(entries)
+    return {
+        "entries": deduped_entries,
+        "by_hash": {
+            str((entry.get("metadata") or {}).get("file_hash") or ""): entry
+            for entry in deduped_entries
+            if str((entry.get("metadata") or {}).get("file_hash") or "")
+        },
+    }
+
+
+def clear_uploaded_entries_cache() -> None:
+    get_uploaded_entries_snapshot.clear()
+
+
+def list_uploaded_entries() -> list[dict]:
+    return list(get_uploaded_entries_snapshot().get("entries", []))
+
+
+def get_uploaded_entry_by_hash(file_hash: str) -> dict | None:
+    return get_uploaded_entries_snapshot().get("by_hash", {}).get(str(file_hash) or "")
+
+
+def rename_uploaded_entry(file_hash: str, file_name: str) -> tuple[list[str], str]:
+    cleaned_hash = str(file_hash or "").strip()
+    cleaned_name = Path((file_name or "").replace("\\", "/")).name.strip()
+    if not cleaned_hash:
+        raise ValueError("Uploaded file hash is missing.")
+    if not cleaned_name:
+        raise ValueError("File name cannot be empty.")
+
+    entry_ids = rename_uploaded_documents_by_hash(cleaned_hash, cleaned_name)
+    clear_uploaded_entries_cache()
+    return entry_ids, cleaned_name
+
+
+def delete_uploaded_entry(file_hash: str, *, clear_cache: bool = True) -> list[str]:
+    cleaned_hash = str(file_hash or "").strip()
+    if not cleaned_hash:
+        return []
+
+    entry_ids, file_paths = delete_uploaded_documents_by_hash(cleaned_hash)
+    if not entry_ids:
+        return []
+
+    try:
+        clear_chroma_client_cache()
+        delete_entry_ids(get_chroma_client(), entry_ids)
+
+        upload_root = normalize_path(get_upload_root())
+        upload_root_path = get_upload_root()
+        for file_path in file_paths:
+            normalized_path = normalize_path(file_path)
+            if not normalized_path.startswith(upload_root):
+                continue
+
+            path = Path(file_path)
+            if path.is_file():
+                path.unlink()
+
+            parent = path.parent
+            while parent != upload_root_path and parent.is_dir():
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+    finally:
+        clear_chroma_client_cache()
+        if clear_cache:
+            clear_uploaded_entries_cache()
+    return entry_ids
