@@ -1,8 +1,6 @@
 Next Up
 
-[X] Add search relevance thresholds to filter and display only good query matches
-
-[ ] Create a random data downloader
+[X] Create a random data downloader
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
 
@@ -26,9 +24,6 @@ Tasks
     [ ] Add RAG-based search features.
     [ ] Add Agentic search utils for specialised searching.
 [ ] UI
-    [X] Add collection filters once query results expose per-result collection metadata.
-    [X] Add a query debugging panel showing per-collection scores and matched fields.
-    [X] Add relevance feedback controls for search results to support ranking evaluation.
     [ ] Add actions to open/copy original file paths from the detail modal.
     [ ] Add a Chat option as relevant.
 [ ] Good SDE practices
