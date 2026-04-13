@@ -1,4 +1,8 @@
-"""Reusable media ingestion orchestration."""
+"""
+ingest.py
+
+Reusable media ingestion orchestration for Mongo-backed metadata, description generation, and Chroma indexing.
+"""
 
 import hashlib, json, os, warnings
 from dataclasses import dataclass, field
@@ -27,6 +31,9 @@ DEFAULT_FLAGGED_ANALYSIS_PATH = os.path.join(
     "json_outs",
     "flagged_analysis_files.json",
 )
+STATUS_STORED = "stored"
+STATUS_DESCRIBED = "described"
+STATUS_INDEXED = "indexed"
 DESCRIPTION_BATCH_SIZE_BY_RIGOR = {
     "very low": 50,
     "low": 20,
@@ -347,10 +354,7 @@ def iter_missing_batches(
             }
             continue
 
-        if (
-            batch_keys
-            and candidate_request["request_bytes"] > max_inline_bytes
-        ):
+        if batch_keys and candidate_request["request_bytes"] > max_inline_bytes:
             yield flush_batch()
             batch_request = build_batch_request(
                 [prepared_entry],
@@ -404,6 +408,38 @@ def annotate_description(description: dict, config: IngestConfig) -> dict:
     return annotated
 
 
+def get_processing_status(entry: dict) -> str:
+    indexing = entry.get("indexing") or {}
+    status = str(indexing.get("status") or "").strip().lower()
+    if status in {STATUS_STORED, STATUS_DESCRIBED, STATUS_INDEXED}:
+        return status
+    if has_chroma_index(entry):
+        return STATUS_INDEXED
+    if has_description(entry):
+        return STATUS_DESCRIBED
+    return STATUS_STORED
+
+
+def sync_processing_statuses(
+    entry_ids: list[str],
+    descriptions: dict,
+    config: IngestConfig,
+) -> None:
+    if not entry_ids:
+        return
+
+    updates = {}
+    for entry_id in entry_ids:
+        entry = descriptions.get(entry_id) or {}
+        status = get_processing_status(entry)
+        indexing = dict(entry.get("indexing") or {})
+        indexing["status"] = status
+        entry["indexing"] = indexing
+        updates[entry_id] = {"indexing.status": status}
+
+    upsert_dict_objects(updates, config.mongo_collection)
+
+
 def apply_batch_output(
     descriptions: dict,
     batch_keys: list[str],
@@ -440,6 +476,7 @@ def flush_new_descriptions(
 
     upsert_dict_objects(new_descriptions, config.mongo_collection)
     descriptions.update(new_descriptions)
+    sync_processing_statuses(list(new_descriptions), descriptions, config)
     return {}
 
 
@@ -496,7 +533,11 @@ def populate_missing(
                 "stage": "description",
                 "reason": (
                     "Skipping analysis because this file is flagged from a prior isolated failure."
-                    + (f" Last isolated failure: {prior_reason}" if prior_reason else "")
+                    + (
+                        f" Last isolated failure: {prior_reason}"
+                        if prior_reason
+                        else ""
+                    )
                 ),
             }
         print(f"Skipping flagged analysis files: {len(skipped_flagged_keys)}")
@@ -511,7 +552,9 @@ def populate_missing(
     total_runnable_keys = len(missing_keys)
 
     while pending_keys:
-        batch_info = next(iter_missing_batches(descriptions, pending_keys, config), None)
+        batch_info = next(
+            iter_missing_batches(descriptions, pending_keys, config), None
+        )
         if not batch_info:
             break
         batch_keys = batch_info["keys"]
@@ -670,7 +713,10 @@ def mark_chroma_indexed(entry_ids: list[str], config: IngestConfig) -> str | Non
     indexed_at = datetime.now(timezone.utc).isoformat()
     upsert_dict_objects(
         objects={
-            entry_id: {"metadata.dates.chroma_indexed_at": indexed_at}
+            entry_id: {
+                "metadata.dates.chroma_indexed_at": indexed_at,
+                "indexing.status": STATUS_INDEXED,
+            }
             for entry_id in entry_ids
         },
         collection=config.mongo_collection,
@@ -705,6 +751,7 @@ def ingest_index(
         config=config,
         keys_to_update=keys_to_update,
     )
+    sync_processing_statuses(list(descriptions), descriptions, config)
     timings["update_metadata"] = perf_counter() - start
 
     start = perf_counter()
@@ -746,6 +793,9 @@ def ingest_index(
                 descriptions.setdefault(key, {}).setdefault("metadata", {}).setdefault(
                     "dates", {}
                 )["chroma_indexed_at"] = indexed_at
+                descriptions.setdefault(key, {}).setdefault("indexing", {})[
+                    "status"
+                ] = STATUS_INDEXED
         chroma_indexed_keys = list(chroma_entries)
     timings["populate_chroma"] = perf_counter() - start
 

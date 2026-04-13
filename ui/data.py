@@ -10,6 +10,7 @@ from pathlib import Path
 import streamlit as st
 
 from ui.config import UPLOAD_ROOT
+from utils.ingest import STATUS_DESCRIBED, STATUS_INDEXED, STATUS_STORED
 from utils.chroma import (
     delete_entry_ids,
     get_chroma_client as create_chroma_client,
@@ -115,8 +116,16 @@ def entry_has_chroma_index(entry: dict) -> bool:
     return bool(get_entry_chroma_index_date(entry))
 
 
-def entry_is_fully_indexed(entry: dict) -> bool:
-    return entry_has_description(entry) and entry_has_chroma_index(entry)
+def get_entry_processing_status(entry: dict) -> str:
+    indexing = entry.get("indexing") or {}
+    status = str(indexing.get("status") or "").strip().lower()
+    if status in {STATUS_STORED, STATUS_DESCRIBED, STATUS_INDEXED}:
+        return status
+    if entry_has_chroma_index(entry):
+        return STATUS_INDEXED
+    if entry_has_description(entry):
+        return STATUS_DESCRIBED
+    return STATUS_STORED
 
 
 def get_entry_upload_date(entry: dict) -> str:
@@ -130,18 +139,16 @@ def get_entry_creation_date(entry: dict) -> str:
     return str(dates.get("true_creation_date") or dates.get("master_date") or "")
 
 
-def is_uploaded_entry(entry: dict) -> bool:
-    file_path = str((entry.get("metadata") or {}).get("file_path") or "")
-    if not file_path:
-        return False
-    return normalize_path(file_path).startswith(normalize_path(get_upload_root()))
-
-
 def normalize_entry(entry: dict) -> dict:
     return {**entry, "_id": str(entry["_id"])}
 
 
 def dedupe_entries_by_hash(entries: list[dict]) -> list[dict]:
+    status_rank = {
+        STATUS_STORED: 0,
+        STATUS_DESCRIBED: 1,
+        STATUS_INDEXED: 2,
+    }
     chosen: dict[str, dict] = {}
     for entry in entries:
         file_hash = str((entry.get("metadata") or {}).get("file_hash") or "")
@@ -154,55 +161,30 @@ def dedupe_entries_by_hash(entries: list[dict]) -> list[dict]:
             chosen[file_hash] = entry
             continue
 
+        current_status = get_entry_processing_status(current)
+        candidate_status = get_entry_processing_status(entry)
+        if status_rank[candidate_status] > status_rank[current_status]:
+            chosen[file_hash] = entry
+            continue
+        if status_rank[current_status] > status_rank[candidate_status]:
+            continue
+
         current_date = get_entry_upload_date(current)
         candidate_date = get_entry_upload_date(entry)
         if candidate_date > current_date:
             chosen[file_hash] = entry
             continue
-        if candidate_date == current_date:
-            if entry_is_fully_indexed(entry) and not entry_is_fully_indexed(current):
-                chosen[file_hash] = entry
-                continue
-            if entry_has_description(entry) and not entry_has_description(current):
-                chosen[file_hash] = entry
 
     return list(chosen.values())
 
 
-def _get_uploaded_entries_snapshot_impl() -> dict[str, object]:
-    entries = [
-        normalize_entry(entry)
-        for entry in get_mongo_collection().find({})
-        if is_uploaded_entry(entry)
-    ]
-    deduped_entries = dedupe_entries_by_hash(entries)
-    return {
-        "entries": deduped_entries,
-        "by_hash": {
-            str((entry.get("metadata") or {}).get("file_hash") or ""): entry
-            for entry in deduped_entries
-            if str((entry.get("metadata") or {}).get("file_hash") or "")
-        },
-    }
-
-
-@st.cache_data(show_spinner=False, ttl=5, max_entries=1)
-def _get_uploaded_entries_snapshot_cached() -> dict[str, object]:
-    return _get_uploaded_entries_snapshot_impl()
-
-
-def get_uploaded_entries_snapshot() -> dict[str, object]:
-    if streamlit_runtime_active():
-        return _get_uploaded_entries_snapshot_cached()
-    return _get_uploaded_entries_snapshot_impl()
-
-
 def _get_gallery_entries_snapshot_impl() -> list[dict]:
-    return [
+    entries = [
         normalize_entry(entry)
         for entry in get_mongo_collection().find({})
         if str((entry.get("metadata") or {}).get("file_path") or "")
     ]
+    return dedupe_entries_by_hash(entries)
 
 
 @st.cache_data(show_spinner=False, ttl=5, max_entries=1)
@@ -217,20 +199,21 @@ def get_gallery_entries_snapshot() -> list[dict]:
 
 
 def clear_uploaded_entries_cache() -> None:
-    _get_uploaded_entries_snapshot_cached.clear()
     _get_gallery_entries_snapshot_cached.clear()
-
-
-def list_uploaded_entries() -> list[dict]:
-    return list(get_uploaded_entries_snapshot().get("entries", []))
 
 
 def list_gallery_entries() -> list[dict]:
     return list(get_gallery_entries_snapshot())
 
 
-def get_uploaded_entry_by_hash(file_hash: str) -> dict | None:
-    return get_uploaded_entries_snapshot().get("by_hash", {}).get(str(file_hash) or "")
+def get_known_entry_by_hash(file_hash: str) -> dict | None:
+    cleaned_hash = str(file_hash or "").strip()
+    if not cleaned_hash:
+        return None
+    for entry in get_gallery_entries_snapshot():
+        if str((entry.get("metadata") or {}).get("file_hash") or "") == cleaned_hash:
+            return entry
+    return None
 
 
 def rename_uploaded_entry(file_hash: str, file_name: str) -> tuple[list[str], str]:

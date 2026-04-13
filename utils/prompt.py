@@ -130,7 +130,9 @@ def salvage_partial_batch_payload(response_text: str) -> dict:
             salvaged_items.append(item)
 
     if salvaged_items:
-        print(f"Salvaged {len(salvaged_items)} complete item(s) from partial batch response.")
+        print(
+            f"Salvaged {len(salvaged_items)} complete item(s) from partial batch response."
+        )
     return {"results": salvaged_items}
 
 
@@ -151,6 +153,7 @@ def batch_prompt_sections(batch_size: int) -> dict:
                 f'Found nothing at "{section_path}" for prompt section named: {section}.'
             )
     return prompt_sections
+
 
 def dummy_description(entry_id: str, metadata: dict) -> dict:
     filename = metadata.get("file_name") or entry_id

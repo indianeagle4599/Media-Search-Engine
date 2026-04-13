@@ -16,6 +16,7 @@ from ui.components import (
     dialog_options,
     get_selected_entry_id,
     render_app_shell,
+    render_results_list,
     render_results_grid,
     render_search_debug_panel,
     search_settings_dialog,
@@ -68,6 +69,11 @@ def initialize_state() -> None:
         "last_result_score_by_id": {},
         "last_result_items": [],
         "last_result_item_by_id": {},
+        "search_results_view": "Grid",
+        "gallery_view": "Grid",
+        "gallery_filter_name": "",
+        "gallery_filter_status": [],
+        "gallery_filter_extensions": [],
         "last_search_response": {},
         "last_search_plan": {},
         "last_search_options": {},
@@ -435,7 +441,21 @@ def main() -> None:
             f"Filters were applied to "
             f"{st.session_state.get('last_candidate_count', len(ids))} candidate(s)."
         )
-    render_results_grid(ids=ids, entries=entries, scores=scores)
+    result_view = st.radio(
+        "View",
+        ["Grid", "Compact list", "Details list"],
+        horizontal=True,
+        key="search_results_view",
+    )
+    if result_view == "Grid":
+        render_results_grid(ids=ids, entries=entries, scores=scores)
+    else:
+        render_results_list(
+            ids=ids,
+            entries=entries,
+            scores=scores,
+            detailed=result_view == "Details list",
+        )
     render_search_debug_panel(st.session_state.get("last_search_response"))
 
     selected_entry_id = get_selected_entry_id()

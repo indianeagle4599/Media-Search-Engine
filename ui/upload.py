@@ -1,4 +1,8 @@
-"""Upload page for metadata-first media storage and pending analysis."""
+"""
+upload.py
+
+Upload page for storing media, describing stored items, and indexing described items.
+"""
 
 import hashlib
 from datetime import datetime, timezone
@@ -9,20 +13,22 @@ import streamlit as st
 from ui.config import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ui.data import (
     clear_uploaded_entries_cache,
-    clear_chroma_client_cache,
     delete_uploaded_entry,
-    entry_is_fully_indexed,
     get_chroma_client,
     get_entry_creation_date,
+    get_known_entry_by_hash,
+    get_entry_processing_status,
     get_entry_upload_date,
     get_upload_root,
-    get_uploaded_entry_by_hash,
-    list_uploaded_entries,
+    list_gallery_entries,
     normalize_path,
 )
 from utils.mongo import get_mongo_collection
 from utils.ingest import (
     DEFAULT_DESCRIPTION_RIGOR,
+    STATUS_DESCRIBED,
+    STATUS_INDEXED,
+    STATUS_STORED,
     build_ingest_config_from_env,
     entry_id_for_file,
     ingest_files,
@@ -31,17 +37,16 @@ from utils.ingest import (
 DEFAULT_UPLOAD_DESCRIPTION_RIGOR = "very low"
 ACTION_IGNORE = "ignore"
 ACTION_REUPLOAD = "reupload"
-STATUS_STORED = "stored"
 STATUS_REUPLOADED = "re_uploaded"
 STATUS_IGNORED = "ignored"
-STATUS_INDEXED = "indexed"
 STATUS_RATE_LIMITED = "rate_limited"
 STATUS_FAILED = "failed"
 RESULT_STATUS_LABELS = {
     STATUS_STORED: "stored",
+    STATUS_DESCRIBED: "described",
+    STATUS_INDEXED: "indexed",
     STATUS_REUPLOADED: "re-uploaded",
     STATUS_IGNORED: "ignored",
-    STATUS_INDEXED: "indexed",
     STATUS_RATE_LIMITED: "rate limited",
     STATUS_FAILED: "failed",
 }
@@ -79,16 +84,18 @@ def ensure_stored_file(path: Path, payload: bytes) -> None:
         path.write_bytes(payload)
 
 
-def build_ingest_config(run_analysis: bool):
+def build_ingest_config(*, run_description: bool, run_indexing: bool):
     return build_ingest_config_from_env(
         mongo_collection=get_mongo_collection(),
-        chroma_client=get_chroma_client() if run_analysis else None,
+        chroma_client=get_chroma_client() if run_indexing else None,
         update_existing_metadata=False,
-        run_analysis=run_analysis,
+        run_analysis=run_description,
         default_description_rigor=(
-            DEFAULT_UPLOAD_DESCRIPTION_RIGOR if run_analysis else DEFAULT_DESCRIPTION_RIGOR
+            DEFAULT_UPLOAD_DESCRIPTION_RIGOR
+            if run_description
+            else DEFAULT_DESCRIPTION_RIGOR
         ),
-        require_api_key=run_analysis,
+        require_api_key=run_description,
     )
 
 
@@ -116,23 +123,23 @@ def classify_uploaded_files(uploaded_files) -> tuple[list[dict], int]:
 
         seen_hashes.add(file_hash)
         original_filename = clean_filename(uploaded_file.name)
-        existing_entry = get_uploaded_entry_by_hash(file_hash)
+        existing_entry = get_known_entry_by_hash(file_hash)
         selections.append(
             {
                 "file_hash": file_hash,
                 "payload": payload,
                 "original_filename": original_filename,
                 "existing_entry": existing_entry,
-                "default_action": (
-                    ACTION_IGNORE if existing_entry else ""
-                ),
+                "default_action": (ACTION_IGNORE if existing_entry else ""),
             }
         )
 
     return selections, duplicate_in_selection_count
 
 
-def selection_action(selection: dict, action_overrides: dict[str, str] | None = None) -> str:
+def selection_action(
+    selection: dict, action_overrides: dict[str, str] | None = None
+) -> str:
     if not selection.get("existing_entry"):
         return ""
     overrides = action_overrides or {}
@@ -145,7 +152,7 @@ def store_selected_uploads(
     seen_at: datetime | None = None,
 ) -> list[dict]:
     seen_at = seen_at or datetime.now(timezone.utc)
-    config = build_ingest_config(run_analysis=False)
+    config = build_ingest_config(run_description=False, run_indexing=False)
     file_paths = []
     overrides: dict[str, dict] = {}
     stored_items = []
@@ -221,13 +228,20 @@ def store_selected_uploads(
     return results
 
 
-def pending_upload_entries(entries: list[dict] | None = None) -> list[dict]:
-    source_entries = list_uploaded_entries() if entries is None else entries
+def pending_upload_entries(
+    entries: list[dict] | None = None,
+    statuses: set[str] | None = None,
+) -> list[dict]:
+    source_entries = list_gallery_entries() if entries is None else entries
     entries = [
         entry
         for entry in source_entries
-        if not entry_is_fully_indexed(entry)
+        if get_entry_processing_status(entry) != STATUS_INDEXED
     ]
+    if statuses:
+        entries = [
+            entry for entry in entries if get_entry_processing_status(entry) in statuses
+        ]
     return sorted(entries, key=lambda entry: get_entry_upload_date(entry))
 
 
@@ -248,15 +262,14 @@ def analysis_overrides(entries: list[dict]) -> dict[str, dict]:
     return overrides
 
 
-def analyze_pending_uploads(
+def describe_pending_uploads(
     pending_entries: list[dict],
     progress_callback=None,
 ) -> list[dict]:
     if not pending_entries:
         return []
 
-    clear_chroma_client_cache()
-    config = build_ingest_config(run_analysis=True)
+    config = build_ingest_config(run_description=True, run_indexing=False)
     config.progress_callback = progress_callback
     try:
         result = ingest_files(
@@ -272,30 +285,71 @@ def analyze_pending_uploads(
         clear_uploaded_entries_cache()
 
     rows = []
-    indexed_keys = set(result.chroma_indexed_keys)
     rate_limited_keys = set(result.rate_limited_keys)
     failed_keys = set(result.failed_keys)
 
     for entry in pending_entries:
         entry_id = str(entry["_id"])
         reason = ""
-        status = STATUS_FAILED
-        if entry_id in indexed_keys:
-            status = STATUS_INDEXED
-        elif entry_id in rate_limited_keys:
+        result_entry = {"_id": entry_id, **(result.descriptions.get(entry_id) or {})}
+        status = get_entry_processing_status(result_entry)
+        if entry_id in rate_limited_keys:
             status = STATUS_RATE_LIMITED
             reason = (
                 result.error_details.get(entry_id, {}).get("reason")
                 or "Gemini quota reached while generating descriptions."
             )
         elif entry_id in failed_keys:
+            status = STATUS_FAILED
             reason = (
                 result.error_details.get(entry_id, {}).get("reason")
                 or "Analysis failed."
             )
-        else:
-            reason = "Analysis did not complete."
 
+        rows.append(
+            {
+                "filename": (entry.get("metadata") or {}).get("file_name") or entry_id,
+                "file_hash": (entry.get("metadata") or {}).get("file_hash") or "",
+                "status": status,
+                "reason": reason,
+                "entry_id": entry_id,
+            }
+        )
+
+    return rows
+
+
+def index_described_uploads(pending_entries: list[dict]) -> list[dict]:
+    if not pending_entries:
+        return []
+
+    config = build_ingest_config(run_description=False, run_indexing=True)
+    try:
+        result = ingest_files(
+            file_paths=[
+                str((entry.get("metadata") or {}).get("file_path") or "")
+                for entry in pending_entries
+            ],
+            config=config,
+            metadata_overrides=analysis_overrides(pending_entries),
+        )
+    finally:
+        clear_uploaded_entries_cache()
+
+    rows = []
+    indexed_keys = set(result.chroma_indexed_keys)
+    failed_keys = set(result.failed_keys)
+
+    for entry in pending_entries:
+        entry_id = str(entry["_id"])
+        reason = ""
+        status = STATUS_INDEXED if entry_id in indexed_keys else STATUS_DESCRIBED
+        if entry_id in failed_keys:
+            status = STATUS_FAILED
+            reason = (
+                result.error_details.get(entry_id, {}).get("reason")
+                or "Indexing failed."
+            )
         rows.append(
             {
                 "filename": (entry.get("metadata") or {}).get("file_name") or entry_id,
@@ -322,9 +376,9 @@ def selection_rows(
                 "file_hash": selection["file_hash"],
                 "filename": selection["original_filename"],
                 "status": "duplicate" if existing_entry else "new",
-                "existing_entry_id": str(existing_entry.get("_id") or "")
-                if existing_entry
-                else "",
+                "existing_entry_id": (
+                    str(existing_entry.get("_id") or "") if existing_entry else ""
+                ),
                 "re_upload": bool(existing_entry and action == ACTION_REUPLOAD),
             }
         )
@@ -356,7 +410,9 @@ def results_table(rows: list[dict]) -> list[dict]:
     return [
         {
             "filename": row.get("filename", ""),
-            "status": RESULT_STATUS_LABELS.get(row.get("status"), row.get("status", "")),
+            "status": RESULT_STATUS_LABELS.get(
+                row.get("status"), row.get("status", "")
+            ),
             "reason": row.get("reason", ""),
             "entry_id": row.get("entry_id", ""),
         }
@@ -371,6 +427,10 @@ def pending_table(entries: list[dict]) -> list[dict]:
         rows.append(
             {
                 "filename": metadata.get("file_name") or str(entry.get("_id") or ""),
+                "status": RESULT_STATUS_LABELS.get(
+                    get_entry_processing_status(entry),
+                    get_entry_processing_status(entry),
+                ),
                 "uploaded_at": get_entry_upload_date(entry)[:19].replace("T", " "),
                 "creation_date": get_entry_creation_date(entry)[:10],
                 "entry_id": str(entry.get("_id") or ""),
@@ -426,7 +486,7 @@ def render_selection_table(
 def render_upload_page() -> None:
     st.subheader("Upload Media")
     st.caption(
-        "Store uploads into `image_data` immediately, then finish description generation and Chroma indexing when capacity is available."
+        "Store files first, then describe stored items, then index described items."
     )
 
     accepted_types = sorted(IMAGE_EXTENSIONS | VIDEO_EXTENSIONS)
@@ -437,7 +497,15 @@ def render_upload_page() -> None:
     )
     selections, duplicate_in_selection_count = classify_uploaded_files(uploaded_files)
     action_overrides = st.session_state.setdefault("upload_duplicate_actions", {})
-    pending_entries = pending_upload_entries(list_uploaded_entries())
+    uploaded_entries = list_gallery_entries()
+    pending_entries = pending_upload_entries(uploaded_entries)
+    stored_entries = pending_upload_entries(uploaded_entries, {STATUS_STORED})
+    described_entries = pending_upload_entries(uploaded_entries, {STATUS_DESCRIBED})
+    indexed_count = sum(
+        1
+        for entry in uploaded_entries
+        if get_entry_processing_status(entry) == STATUS_INDEXED
+    )
 
     if selections:
         render_selection_table(selections, action_overrides)
@@ -446,26 +514,40 @@ def render_upload_page() -> None:
                 f"Ignoring {duplicate_in_selection_count} repeated file(s) in the current selection."
             )
 
-    store_col, analyze_col = st.columns(2)
+    store_col, describe_col, index_col = st.columns(3)
     with store_col:
         if st.button(
             "Store uploads",
             disabled=not selections,
         ):
             try:
-                with st.spinner("Storing files and indexing metadata..."):
+                with st.spinner("Storing files and metadata..."):
                     results = store_selected_uploads(
                         selections=selections,
                         action_overrides=action_overrides,
                     )
-                pending_entries = pending_upload_entries(list_uploaded_entries())
+                uploaded_entries = list_gallery_entries()
+                pending_entries = pending_upload_entries(uploaded_entries)
+                stored_entries = pending_upload_entries(
+                    uploaded_entries, {STATUS_STORED}
+                )
+                described_entries = pending_upload_entries(
+                    uploaded_entries, {STATUS_DESCRIBED}
+                )
+                indexed_count = sum(
+                    1
+                    for entry in uploaded_entries
+                    if get_entry_processing_status(entry) == STATUS_INDEXED
+                )
                 st.session_state["upload_store_results"] = results
                 stored_count = sum(
                     1
                     for row in results
                     if row["status"] in {STATUS_STORED, STATUS_REUPLOADED}
                 )
-                ignored_count = sum(1 for row in results if row["status"] == STATUS_IGNORED)
+                ignored_count = sum(
+                    1 for row in results if row["status"] == STATUS_IGNORED
+                )
                 message = f"Stored {stored_count} file(s)."
                 if ignored_count:
                     message += f" Ignored {ignored_count} duplicate file(s)."
@@ -474,10 +556,10 @@ def render_upload_page() -> None:
                 st.error("Storing uploads failed.")
                 st.exception(exc)
 
-    with analyze_col:
+    with describe_col:
         if st.button(
-            "Analyze pending",
-            disabled=not pending_entries,
+            "Describe stored",
+            disabled=not stored_entries,
             type="primary",
         ):
             progress_status = st.empty()
@@ -496,22 +578,69 @@ def render_upload_page() -> None:
                 )
 
             try:
-                with st.spinner("Analyzing pending uploads..."):
-                    results = analyze_pending_uploads(
-                        pending_entries,
+                with st.spinner("Describing stored uploads..."):
+                    results = describe_pending_uploads(
+                        stored_entries,
                         progress_callback=update_progress,
                     )
-                pending_entries = pending_upload_entries(list_uploaded_entries())
+                uploaded_entries = list_gallery_entries()
+                pending_entries = pending_upload_entries(uploaded_entries)
+                stored_entries = pending_upload_entries(
+                    uploaded_entries, {STATUS_STORED}
+                )
+                described_entries = pending_upload_entries(
+                    uploaded_entries, {STATUS_DESCRIBED}
+                )
+                indexed_count = sum(
+                    1
+                    for entry in uploaded_entries
+                    if get_entry_processing_status(entry) == STATUS_INDEXED
+                )
                 progress_status.empty()
-                st.session_state["upload_analysis_results"] = results
-                indexed_count = sum(1 for row in results if row["status"] == STATUS_INDEXED)
+                st.session_state["upload_description_results"] = results
+                described_count = sum(
+                    1 for row in results if row["status"] == STATUS_DESCRIBED
+                )
+                if described_count:
+                    st.success(f"Described {described_count} file(s).")
+                else:
+                    st.warning("No stored files were described.")
+            except Exception as exc:
+                progress_status.empty()
+                st.error("Pending description failed.")
+                st.exception(exc)
+
+    with index_col:
+        if st.button(
+            "Index described",
+            disabled=not described_entries,
+        ):
+            try:
+                with st.spinner("Indexing described uploads..."):
+                    results = index_described_uploads(described_entries)
+                uploaded_entries = list_gallery_entries()
+                pending_entries = pending_upload_entries(uploaded_entries)
+                stored_entries = pending_upload_entries(
+                    uploaded_entries, {STATUS_STORED}
+                )
+                described_entries = pending_upload_entries(
+                    uploaded_entries, {STATUS_DESCRIBED}
+                )
+                indexed_count = sum(
+                    1
+                    for entry in uploaded_entries
+                    if get_entry_processing_status(entry) == STATUS_INDEXED
+                )
+                st.session_state["upload_index_results"] = results
+                indexed_count = sum(
+                    1 for row in results if row["status"] == STATUS_INDEXED
+                )
                 if indexed_count:
                     st.success(f"Indexed {indexed_count} file(s).")
                 else:
-                    st.warning("No pending files were fully indexed.")
+                    st.warning("No described files were indexed.")
             except Exception as exc:
-                progress_status.empty()
-                st.error("Pending upload analysis failed.")
+                st.error("Pending indexing failed.")
                 st.exception(exc)
 
     stored_results = st.session_state.setdefault("upload_store_results", [])
@@ -519,10 +648,13 @@ def render_upload_page() -> None:
         st.markdown("**Store results**")
         st.dataframe(results_table(stored_results), hide_index=True)
 
-    st.markdown("**Pending analysis**")
+    st.markdown("**Processing queue**")
+    st.caption(
+        f"{len(stored_entries)} stored, {len(described_entries)} described, {indexed_count} indexed."
+    )
     if pending_entries:
         st.caption(
-            f"{len(pending_entries)} uploaded file(s) are stored in MongoDB but still missing generated descriptions or Chroma indexing."
+            f"{len(stored_entries)} stored, {len(described_entries)} described, {len(pending_entries)} total not yet indexed."
         )
         st.dataframe(
             pending_table(pending_entries),
@@ -531,10 +663,18 @@ def render_upload_page() -> None:
     else:
         st.info("No pending uploads.")
 
-    analysis_results = st.session_state.setdefault("upload_analysis_results", [])
-    if analysis_results:
-        st.markdown("**Latest analysis results**")
+    description_results = st.session_state.setdefault("upload_description_results", [])
+    if description_results:
+        st.markdown("**Latest description results**")
         st.dataframe(
-            results_table(analysis_results),
+            results_table(description_results),
+            hide_index=True,
+        )
+
+    index_results = st.session_state.setdefault("upload_index_results", [])
+    if index_results:
+        st.markdown("**Latest indexing results**")
+        st.dataframe(
+            results_table(index_results),
             hide_index=True,
         )

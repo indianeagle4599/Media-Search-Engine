@@ -1,6 +1,9 @@
 Next Up
 
 [X] Create a random data downloader
+[X] Add filter options in gallery
+[X] Add compact list and details list view in search and gallery
+
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
 
@@ -20,12 +23,15 @@ Tasks
     [ ] Use pydantic for maintaining standard schema
     [ ] ChromaDB
         [ ] Create retrieval evaluation setup
-            [ ] Create a random data downloader
     [ ] Add RAG-based search features.
     [ ] Add Agentic search utils for specialised searching.
 [ ] UI
-    [ ] Add actions to open/copy original file paths from the detail modal.
+    [X] Add filter options in gallery
+    [X] Add compact list and details list view in search and gallery
     [ ] Add a Chat option as relevant.
 [ ] Good SDE practices
     [ ] Setup Pytest and design test cases for various functions.
     [ ] Add docstrings
+[ ] Production-grade prep
+    [ ] Code/service containerization
+    [ ] Setup asyncio/celery to run services parallely

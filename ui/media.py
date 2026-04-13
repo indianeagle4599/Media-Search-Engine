@@ -207,7 +207,9 @@ def render_html_block(markup: str, *, height: int) -> None:
         html_fn(markup, **kwargs)
         return
 
-    component_html = getattr(getattr(getattr(st, "components", None), "v1", None), "html", None)
+    component_html = getattr(
+        getattr(getattr(st, "components", None), "v1", None), "html", None
+    )
     if component_html:
         component_html(markup, height=height, scrolling=False)
         return

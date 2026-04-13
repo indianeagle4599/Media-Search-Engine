@@ -20,7 +20,7 @@ from ui.config import (
 from ui.data import (
     delete_uploaded_entry,
     entry_has_description,
-    entry_is_fully_indexed,
+    get_entry_processing_status,
     manifest_source_options,
     rename_uploaded_entry,
     uploaded_entry_file_hash,
@@ -28,6 +28,7 @@ from ui.data import (
 from ui.formatting import get_entry_display_fields, get_summary, to_jsonable
 from ui.history import save_feedback
 from ui.media import get_thumbnail_data_uri, render_media
+from utils.ingest import STATUS_DESCRIBED, STATUS_INDEXED, STATUS_STORED
 from utils.retrieval import SearchManifest
 
 
@@ -84,9 +85,10 @@ def preset_focus_values(preset: str | None = None) -> dict[str, int]:
     preset_key = str(
         preset or st.session_state.get("search_preset") or SearchManifest.DEFAULT_PRESET
     )
-    preset_config = SearchManifest.PRESETS.get(preset_key) or SearchManifest.PRESETS[
-        SearchManifest.DEFAULT_PRESET
-    ]
+    preset_config = (
+        SearchManifest.PRESETS.get(preset_key)
+        or SearchManifest.PRESETS[SearchManifest.DEFAULT_PRESET]
+    )
     focus = dict(SearchManifest.DEFAULT_FOCUS)
     focus.update(preset_config.get("focus") or {})
     return {
@@ -458,8 +460,7 @@ def render_indexed_detail_body(
 ) -> None:
     metadata, file_path, file_name, ext = get_entry_display_fields(entry_id, entry)
     full_document = {"_id": entry_id, **entry}
-    described = entry_has_description(entry)
-    fully_indexed = entry_is_fully_indexed(entry)
+    processing_status = get_entry_processing_status(entry)
     result_item = (st.session_state.get("last_result_item_by_id") or {}).get(
         entry_id
     ) or {}
@@ -467,7 +468,13 @@ def render_indexed_detail_body(
     st.subheader(file_name)
     st.caption(
         detail_caption(
-            rank, score, "Indexed media" if fully_indexed else "Pending indexing"
+            rank,
+            score,
+            {
+                STATUS_STORED: "Stored media",
+                STATUS_DESCRIBED: "Described media",
+                STATUS_INDEXED: "Indexed media",
+            }.get(processing_status, "Media"),
         )
     )
 
@@ -476,20 +483,20 @@ def render_indexed_detail_body(
         render_media(file_path=file_path, ext=ext)
 
     with right:
-        if fully_indexed:
+        if processing_status == STATUS_INDEXED:
             st.markdown("**Summary**")
             st.write(get_summary(entry))
-        elif described:
-            st.markdown("**Indexing status**")
-            st.write("Waiting for Chroma")
+        elif processing_status == STATUS_DESCRIBED:
+            st.markdown("**Processing status**")
+            st.write("Description complete")
             st.caption(
                 "Description is stored in MongoDB. Chroma indexing has not completed yet."
             )
         else:
-            st.markdown("**Analysis status**")
-            st.write("Waiting for description")
+            st.markdown("**Processing status**")
+            st.write("Stored only")
             st.caption(
-                "Metadata is stored. Description generation and Chroma indexing have not completed yet."
+                "File and metadata are stored. Description generation and Chroma indexing have not completed yet."
             )
         render_uploaded_management_section(
             entry_id=entry_id,
@@ -686,6 +693,76 @@ def render_media_card(
     )
 
 
+def render_list_preview(
+    file_path: str,
+    file_name: str,
+    ext: str,
+    *,
+    preview_width: int,
+) -> None:
+    path = Path(file_path) if file_path else None
+    if ext in IMAGE_EXTENSIONS and path and path.is_file():
+        try:
+            st.image(
+                get_thumbnail_data_uri(str(path), path.stat().st_mtime_ns),
+                width=int(preview_width),
+            )
+            return
+        except Exception:
+            pass
+
+    if ext in VIDEO_EXTENSIONS:
+        st.info("Video")
+    else:
+        st.info("Preview unavailable")
+    st.caption(file_name)
+
+
+def render_media_list_row(
+    file_path: str,
+    file_name: str,
+    ext: str,
+    *,
+    title: str,
+    meta_lines: list[str] | None = None,
+    body_text: str = "",
+    detail_entry_id: str | None = None,
+    detail_title: str | None = None,
+    button_key_prefix: str = "result_list_detail",
+    preview_ratio: float = 1.0,
+    preview_width: int = 96,
+) -> None:
+    preview_col, body_col, action_col = st.columns(
+        [preview_ratio, 5.95 - preview_ratio, 1.15],
+        gap="medium",
+    )
+    with preview_col:
+        preview_width = max(48, int(preview_width or 96))
+        render_list_preview(
+            file_path,
+            file_name,
+            ext,
+            preview_width=preview_width,
+        )
+    with body_col:
+        st.markdown(f"**{title}**")
+        for line in meta_lines or []:
+            st.caption(line)
+        if body_text:
+            st.write(body_text)
+    with action_col:
+        if detail_entry_id:
+            st.button(
+                "Details",
+                key=f"{button_key_prefix}_{detail_entry_id}",
+                help=detail_title or f"Open details for {file_name}",
+                on_click=set_selected_entry_id,
+                args=(detail_entry_id,),
+                width="stretch",
+            )
+    st.divider()
+
+
 def render_result_card(
     entry_id: str,
     entry: dict,
@@ -717,6 +794,59 @@ def render_result_card(
         detail_title=f"{file_name} · {score_text}",
         overlay_details_html="".join(overlay_lines) or None,
     )
+
+
+def render_results_list(
+    ids: list[str],
+    entries: dict,
+    scores: list[float],
+    *,
+    detailed: bool = False,
+) -> None:
+    update_result_indexes(ids, scores)
+    score_by_id = st.session_state["last_result_score_by_id"]
+    source_labels = source_label_map()
+
+    for index, entry_id in enumerate(ids):
+        entry = entries.get(entry_id)
+        if not entry:
+            st.warning(f"Result {entry_id} was not found in MongoDB.")
+            continue
+
+        _, file_path, file_name, ext = get_entry_display_fields(entry_id, entry)
+        score = score_by_id.get(entry_id)
+        result_item = (st.session_state.get("last_result_item_by_id") or {}).get(
+            entry_id
+        ) or {}
+        meta_lines = [
+            " · ".join(
+                value
+                for value in [
+                    f"Rank {index + 1}",
+                    f"Score {score:.4f}" if score is not None else "",
+                    source_labels.get(result_item.get("best_source_id"), ""),
+                ]
+                if value
+            )
+        ]
+        if detailed and (result_item.get("matched_fields") or []):
+            meta_lines.append(
+                "Matched fields: " + ", ".join(result_item.get("matched_fields") or [])
+            )
+
+        render_media_list_row(
+            file_path=file_path,
+            file_name=file_name,
+            ext=ext,
+            title=file_name,
+            meta_lines=meta_lines,
+            body_text=get_summary(entry) if detailed else "",
+            detail_entry_id=entry_id,
+            detail_title=file_name,
+            button_key_prefix="search_result_list_detail",
+            preview_ratio=1.3 if detailed else 0.75,
+            preview_width=200 if detailed else 72,
+        )
 
 
 def render_results_grid(
