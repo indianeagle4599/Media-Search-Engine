@@ -5,6 +5,7 @@ Contains utilities to create modular and versatile prompts and perform the neces
 """
 
 import os, warnings, json
+from pathlib import Path
 from functools import lru_cache
 from typing import Any
 
@@ -18,12 +19,119 @@ REPO_ROOT = os.getenv("REPO_ROOT")
 REQUEST_TEXT_OVERHEAD_BYTES = 64
 REQUEST_INLINE_PART_OVERHEAD_BYTES = 128
 REQUEST_CONTAINER_OVERHEAD_BYTES = 512
+TEMP_BATCH_RESPONSE_PATH = Path("json_outs/temp_batch_response.json")
 
 
 def render_prompt_template(template: str, attachments_dict: dict) -> str:
     for attachment, value in attachments_dict.items():
         template = template.replace(f"__{attachment}__", value)
     return template
+
+
+def normalize_response_json_text(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    first_object = text.find("{")
+    first_array = text.find("[")
+    starts = [index for index in (first_object, first_array) if index >= 0]
+    if starts:
+        start = min(starts)
+        end = max(text.rfind("}"), text.rfind("]"))
+        if end >= start:
+            text = text[start : end + 1]
+
+    cleaned = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if escaped:
+            cleaned.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            cleaned.append(char)
+            escaped = True
+            continue
+        if char == '"':
+            cleaned.append(char)
+            in_string = not in_string
+            continue
+        if in_string and ord(char) < 32:
+            cleaned.append(
+                {
+                    "\n": "\\n",
+                    "\r": "\\r",
+                    "\t": "\\t",
+                }.get(char, " ")
+            )
+            continue
+        cleaned.append(char)
+    return "".join(cleaned)
+
+
+def salvage_partial_batch_payload(response_text: str) -> dict:
+    def iter_closed_objects(text: str, start_index: int):
+        index = start_index
+        while index < len(text):
+            char = text[index]
+            if char in " \t\r\n,":
+                index += 1
+                continue
+            if char == "]":
+                return
+            if char != "{":
+                index += 1
+                continue
+
+            depth = 0
+            in_string = False
+            escaped = False
+            object_start = index
+            while index < len(text):
+                current = text[index]
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    in_string = not in_string
+                elif not in_string:
+                    if current == "{":
+                        depth += 1
+                    elif current == "}":
+                        depth -= 1
+                        if depth == 0:
+                            yield text[object_start : index + 1]
+                            index += 1
+                            break
+                index += 1
+            else:
+                return
+
+    results_key = response_text.find('"results"')
+    array_start = response_text.find("[", results_key if results_key >= 0 else 0)
+    if array_start < 0:
+        return {}
+
+    salvaged_items = []
+    for object_text in iter_closed_objects(response_text, array_start + 1):
+        try:
+            item = json.loads(object_text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            salvaged_items.append(item)
+
+    if salvaged_items:
+        print(f"Salvaged {len(salvaged_items)} complete item(s) from partial batch response.")
+    return {"results": salvaged_items}
 
 
 @lru_cache(maxsize=16)
@@ -174,7 +282,13 @@ def parse_batch_response(
 ) -> dict[str, dict]:
     payload = getattr(response, "parsed", None)
     if payload is None:
-        payload = json.loads(getattr(response, "text"))
+        response_text = normalize_response_json_text(getattr(response, "text", ""))
+        TEMP_BATCH_RESPONSE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        TEMP_BATCH_RESPONSE_PATH.write_text(response_text, encoding="utf-8")
+        try:
+            payload = json.loads(response_text)
+        except json.JSONDecodeError:
+            payload = salvage_partial_batch_payload(response_text)
 
     items = payload.get("results", payload) if isinstance(payload, dict) else payload
     if isinstance(items, dict):

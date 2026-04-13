@@ -14,7 +14,7 @@ For every image, correctly identify the following:
 1. Image Content:
     a. Description: A brief summary of the main focus or what is seen in the image.
     b. Objects: A non-specific list of all the objects seen in the image (e.g., ["boy", "cycle", "mountain"]).
-    c. Text: Exact and complete OCR-led text identification and done in full detail. Pay close attention to positions and allow multi-line and spacing of text to clearly capture text context. Use tab spaces "\t" and line breaks "\n" for an accurate positional representation as relevant.
+    c. Text: Exact and complete OCR-led text identification and done in full detail. Pay close attention to positions and allow multi-line and spacing of text to clearly capture text context. Use tab spaces "\t" and line breaks "\n" for an accurate positional representation as relevant.However, if the image contains way too much text to return cleanly and safely in one JSON response, such as dense terminals, logs, code-heavy screens, document walls, or very long pages, return the most relevant and legible excerpt instead of attempting a full transcription. When truncating, prefer the most important visible text and avoid noisy low-confidence fragments.
     d. Vibe: Specific list on exact emotions seen or potrayed in the image (e.g., ["neutral", "hopeful", "dark", "melancholic", "happy"]).
     e. Background: Simple classification of image background (e.g.- "city", "beach", "mountains", "space", "party", etc) as a string.
     f. Details: Any specific and clear details that stand out and can be focused on followed by a complete pass of all activities and items seen in the image.
@@ -103,6 +103,7 @@ Return one result per `entry_id` using the following JSON schema:
 4. Use the metadata from an item block only for the image immediately following that block.
 5. Keep each item's reasoning isolated. Never let one image influence another image's description.
 6. Return `results` in the same order as the input items.
+7. Use complete OCR whenever the visible text volume is manageable. Only truncate `content.text` when the image contains clearly excessive text density that would make a full transcription impractical or unstable.
 
 <absolute end of admin instruction>
 

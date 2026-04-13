@@ -24,6 +24,15 @@ from utils.mongo import (
 from utils.retrieval import SearchManifest
 
 
+def streamlit_runtime_active() -> bool:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
 @st.cache_resource(show_spinner=False)
 def get_chroma_client():
     return create_chroma_client(path=os.getenv("CHROMA_URL"))
@@ -137,6 +146,7 @@ def dedupe_entries_by_hash(entries: list[dict]) -> list[dict]:
     for entry in entries:
         file_hash = str((entry.get("metadata") or {}).get("file_hash") or "")
         if not file_hash:
+            chosen[str(entry.get("_id") or "")] = entry
             continue
 
         current = chosen.get(file_hash)
@@ -159,8 +169,7 @@ def dedupe_entries_by_hash(entries: list[dict]) -> list[dict]:
     return list(chosen.values())
 
 
-@st.cache_data(show_spinner=False, ttl=5, max_entries=1)
-def get_uploaded_entries_snapshot() -> dict[str, object]:
+def _get_uploaded_entries_snapshot_impl() -> dict[str, object]:
     entries = [
         normalize_entry(entry)
         for entry in get_mongo_collection().find({})
@@ -177,12 +186,47 @@ def get_uploaded_entries_snapshot() -> dict[str, object]:
     }
 
 
+@st.cache_data(show_spinner=False, ttl=5, max_entries=1)
+def _get_uploaded_entries_snapshot_cached() -> dict[str, object]:
+    return _get_uploaded_entries_snapshot_impl()
+
+
+def get_uploaded_entries_snapshot() -> dict[str, object]:
+    if streamlit_runtime_active():
+        return _get_uploaded_entries_snapshot_cached()
+    return _get_uploaded_entries_snapshot_impl()
+
+
+def _get_gallery_entries_snapshot_impl() -> list[dict]:
+    return [
+        normalize_entry(entry)
+        for entry in get_mongo_collection().find({})
+        if str((entry.get("metadata") or {}).get("file_path") or "")
+    ]
+
+
+@st.cache_data(show_spinner=False, ttl=5, max_entries=1)
+def _get_gallery_entries_snapshot_cached() -> list[dict]:
+    return _get_gallery_entries_snapshot_impl()
+
+
+def get_gallery_entries_snapshot() -> list[dict]:
+    if streamlit_runtime_active():
+        return _get_gallery_entries_snapshot_cached()
+    return _get_gallery_entries_snapshot_impl()
+
+
 def clear_uploaded_entries_cache() -> None:
-    get_uploaded_entries_snapshot.clear()
+    _get_uploaded_entries_snapshot_cached.clear()
+    _get_gallery_entries_snapshot_cached.clear()
 
 
 def list_uploaded_entries() -> list[dict]:
     return list(get_uploaded_entries_snapshot().get("entries", []))
+
+
+def list_gallery_entries() -> list[dict]:
+    return list(get_gallery_entries_snapshot())
 
 
 def get_uploaded_entry_by_hash(file_hash: str) -> dict | None:

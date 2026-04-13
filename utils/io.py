@@ -188,7 +188,8 @@ def warn(msg: str):
 
 
 def get_ext(path: str):
-    return os.path.splitext(path)[-1][1:].lower()
+    cleaned_path = str(path or "").split("?", 1)[0].split("#", 1)[0]
+    return os.path.splitext(cleaned_path)[-1][1:].lower()
 
 
 def get_mime_type(file_path: str, media_type: str = "") -> str:

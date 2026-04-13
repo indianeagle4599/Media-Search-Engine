@@ -17,13 +17,12 @@ from ui.data import (
     get_entries,
     get_entry_creation_date,
     get_entry_upload_date,
-    list_uploaded_entries,
+    list_gallery_entries,
 )
 from ui.formatting import get_entry_display_fields
 
 
 DEFAULT_SORT = "Upload date (newest first)"
-GALLERY_LIMIT_OPTIONS = [24, 48, 96, 144, 200]
 SORT_OPTIONS = [
     DEFAULT_SORT,
     "Upload date (oldest first)",
@@ -70,9 +69,11 @@ def sort_gallery_records(records: list[dict], sort_by: str) -> list[dict]:
 
 
 def get_gallery_records(limit: int = 48, sort_by: str = DEFAULT_SORT) -> list[dict]:
-    records = [build_gallery_record(entry) for entry in list_uploaded_entries()]
+    records = [build_gallery_record(entry) for entry in list_gallery_entries()]
     records = [record for record in records if record.get("ext") in IMAGE_EXTENSIONS]
     records = sort_gallery_records(records, sort_by)
+    if int(limit) <= 0:
+        return records
     return records[: int(limit)]
 
 
@@ -141,15 +142,19 @@ def render_gallery_detail() -> None:
 def render_gallery_page() -> None:
     st.subheader("Gallery")
     st.caption(
-        "Browse uploaded images stored in `image_data`. Files stay pending until both descriptions and Chroma indexing are complete."
+        "Browse image entries stored in MongoDB. Files stay pending until both descriptions and Chroma indexing are complete."
     )
 
     sort_col, limit_col = st.columns([2, 1])
     with sort_col:
         sort_by = st.selectbox("Sort by", SORT_OPTIONS, index=0)
+    all_records = get_gallery_records(limit=0, sort_by=sort_by)
     with limit_col:
-        limit = st.selectbox("Images to show", GALLERY_LIMIT_OPTIONS, index=0)
+        base_options = [24, 48, 96, 144, 200]
+        limit_options = [option for option in base_options if option < len(all_records)]
+        limit_options.append("All")
+        limit = st.selectbox("Images to show", limit_options, index=0)
 
-    records = get_gallery_records(limit=int(limit), sort_by=sort_by)
+    records = all_records if limit == "All" else all_records[: int(limit)]
     render_gallery_grid(records)
     render_gallery_detail()

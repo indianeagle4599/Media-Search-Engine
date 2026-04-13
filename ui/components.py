@@ -21,7 +21,6 @@ from ui.data import (
     delete_uploaded_entry,
     entry_has_description,
     entry_is_fully_indexed,
-    is_uploaded_entry,
     manifest_source_options,
     rename_uploaded_entry,
     uploaded_entry_file_hash,
@@ -152,7 +151,7 @@ def render_search_settings_body() -> None:
     with title_col:
         st.caption("Tune retrieval first, then optionally filter the returned results.")
     with reset_col:
-        if st.button("Reset", key="search_settings_reset", use_container_width=True):
+        if st.button("Reset", key="search_settings_reset", width="stretch"):
             reset_search_settings()
     st.session_state["top_n"] = int(
         st.number_input(
@@ -289,7 +288,7 @@ def render_close_button(entry_id: str, close_label: str) -> None:
         close_label,
         key=f"detail_close_action_{entry_id}",
         type="primary",
-        use_container_width=True,
+        width="stretch",
     ):
         clear_selected_entry_id()
         st.rerun()
@@ -343,11 +342,6 @@ def render_uploaded_management_section(
     close_label: str,
     file_path: str,
 ) -> None:
-    if not is_uploaded_entry(entry):
-        render_close_button(entry_id, close_label)
-        render_detail_path(file_path)
-        return
-
     file_hash = uploaded_entry_file_hash(entry)
     if not file_hash:
         render_close_button(entry_id, close_label)
@@ -355,7 +349,7 @@ def render_uploaded_management_section(
         return
 
     st.divider()
-    st.markdown("**Manage upload**")
+    st.markdown("**Manage media**")
     st.caption("Display name")
 
     rename_key = f"uploaded_rename_name_{entry_id}"
@@ -374,7 +368,7 @@ def render_uploaded_management_section(
         rename_submitted = st.button(
             "Save name",
             key=f"uploaded_rename_submit_{entry_id}",
-            use_container_width=True,
+            width="stretch",
         )
 
     if rename_submitted:
@@ -397,9 +391,9 @@ def render_uploaded_management_section(
         render_close_button(entry_id, close_label)
     with delete_col:
         if st.button(
-            "Delete upload",
+            "Delete media",
             key=f"uploaded_delete_prompt_{entry_id}",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state[PENDING_DELETE_ENTRY_ID_KEY] = str(entry_id)
             st.session_state[PENDING_DELETE_FILE_HASH_KEY] = file_hash
@@ -421,10 +415,10 @@ def render_delete_confirm_body(entry_id: str, entry: dict) -> None:
         st.warning("Uploaded file details are missing.")
         return
 
-    st.subheader("Delete upload")
+    st.subheader("Delete media")
     st.write(f"Permanently delete `{pending_file_name}`?")
     st.warning(
-        "This removes the uploaded file from disk and deletes its related MongoDB and Chroma records."
+        "This deletes the related MongoDB and Chroma records. If the file lives under the upload root, it is also removed from disk."
     )
     render_detail_path(file_path)
 
@@ -434,7 +428,7 @@ def render_delete_confirm_body(entry_id: str, entry: dict) -> None:
             "Back to details",
             key=f"uploaded_delete_cancel_{entry_id}",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         ):
             clear_detail_action_state()
             st.rerun()
@@ -442,7 +436,7 @@ def render_delete_confirm_body(entry_id: str, entry: dict) -> None:
         if st.button(
             "Delete permanently",
             key=f"uploaded_delete_confirm_action_{entry_id}",
-            use_container_width=True,
+            width="stretch",
         ):
             try:
                 deleted_entry_ids = delete_uploaded_entry(file_hash)
@@ -771,7 +765,7 @@ def render_feedback_section(
     if positive_col.button(
         "Relevant",
         key=f"feedback_positive_{entry_id}",
-        use_container_width=True,
+        width="stretch",
     ):
         save_feedback(
             query=query,
@@ -790,7 +784,7 @@ def render_feedback_section(
     if negative_col.button(
         "Not relevant",
         key=f"feedback_negative_{entry_id}",
-        use_container_width=True,
+        width="stretch",
     ):
         save_feedback(
             query=query,
@@ -844,12 +838,12 @@ def render_search_debug_panel(result_response: dict | None) -> None:
         st.json(to_jsonable(search_plan), expanded=False)
         if debug.get("source_stats"):
             st.markdown("**Source stats**")
-            st.dataframe(debug["source_stats"], use_container_width=True)
+            st.dataframe(debug["source_stats"], width="stretch")
         else:
             st.info("Debug data was not collected for this search.")
         if contribution_rows:
             st.markdown("**Top contribution rows**")
-            st.dataframe(contribution_rows, use_container_width=True)
+            st.dataframe(contribution_rows, width="stretch")
         if debug.get("trace"):
             st.markdown("**Trace**")
             st.code(

@@ -177,6 +177,10 @@ def store_selected_uploads(
         stored_path = upload_storage_path(file_hash, ext, seen_at)
         ensure_stored_file(stored_path, selection["payload"])
         normalized_path = normalize_path(stored_path)
+        print(
+            "Stored upload:",
+            f"{selection['original_filename']} -> {normalized_path}",
+        )
         file_paths.append(normalized_path)
         overrides[normalized_path] = metadata_override(
             selection["original_filename"], seen_at
@@ -244,12 +248,16 @@ def analysis_overrides(entries: list[dict]) -> dict[str, dict]:
     return overrides
 
 
-def analyze_pending_uploads(pending_entries: list[dict]) -> list[dict]:
+def analyze_pending_uploads(
+    pending_entries: list[dict],
+    progress_callback=None,
+) -> list[dict]:
     if not pending_entries:
         return []
 
     clear_chroma_client_cache()
     config = build_ingest_config(run_analysis=True)
+    config.progress_callback = progress_callback
     try:
         result = ingest_files(
             file_paths=[
@@ -472,10 +480,29 @@ def render_upload_page() -> None:
             disabled=not pending_entries,
             type="primary",
         ):
+            progress_status = st.empty()
+
+            def update_progress(payload: dict) -> None:
+                if payload.get("stage") != "description_batch":
+                    return
+                total = int(payload.get("total", 0) or 0)
+                completed = int(payload.get("completed", 0) or 0)
+                remaining = int(payload.get("remaining", 0) or 0)
+                batch_total = int(payload.get("batch_size", 0) or 0)
+                batch_succeeded = int(payload.get("batch_succeeded", 0) or 0)
+                progress_status.info(
+                    f"{completed} of {total} image(s) described successfully. "
+                    f"{remaining} remaining. Current batch: {batch_succeeded}/{batch_total}."
+                )
+
             try:
                 with st.spinner("Analyzing pending uploads..."):
-                    results = analyze_pending_uploads(pending_entries)
+                    results = analyze_pending_uploads(
+                        pending_entries,
+                        progress_callback=update_progress,
+                    )
                 pending_entries = pending_upload_entries(list_uploaded_entries())
+                progress_status.empty()
                 st.session_state["upload_analysis_results"] = results
                 indexed_count = sum(1 for row in results if row["status"] == STATUS_INDEXED)
                 if indexed_count:
@@ -483,6 +510,7 @@ def render_upload_page() -> None:
                 else:
                     st.warning("No pending files were fully indexed.")
             except Exception as exc:
+                progress_status.empty()
                 st.error("Pending upload analysis failed.")
                 st.exception(exc)
 

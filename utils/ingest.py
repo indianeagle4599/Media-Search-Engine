@@ -23,6 +23,10 @@ DEFAULT_DESCRIPTION_RIGOR = "very low"
 DEFAULT_DESCRIPTION_MAX_INLINE_BYTES = 18 * 1024 * 1024
 DEFAULT_ANALYSIS_IMAGE_MAX_WIDTH = 1600
 DEFAULT_ANALYSIS_IMAGE_MAX_HEIGHT = 1600
+DEFAULT_FLAGGED_ANALYSIS_PATH = os.path.join(
+    "json_outs",
+    "flagged_analysis_files.json",
+)
 DESCRIPTION_BATCH_SIZE_BY_RIGOR = {
     "very low": 50,
     "low": 20,
@@ -46,8 +50,11 @@ class IngestConfig:
     description_max_inline_bytes: int = DEFAULT_DESCRIPTION_MAX_INLINE_BYTES
     analysis_image_max_width: int = DEFAULT_ANALYSIS_IMAGE_MAX_WIDTH
     analysis_image_max_height: int = DEFAULT_ANALYSIS_IMAGE_MAX_HEIGHT
+    flagged_analysis_path: str = DEFAULT_FLAGGED_ANALYSIS_PATH
+    include_flagged_files: bool = False
     use_dummy_descriptions: bool = False
     verbose: bool = False
+    progress_callback: Any | None = None
 
 
 @dataclass
@@ -122,6 +129,10 @@ def build_ingest_config_from_env(
                 DEFAULT_ANALYSIS_IMAGE_MAX_HEIGHT,
             )
         ),
+        flagged_analysis_path=os.getenv(
+            "MEDIA_FLAGGED_ANALYSIS_PATH",
+            DEFAULT_FLAGGED_ANALYSIS_PATH,
+        ),
         use_dummy_descriptions=use_dummy_descriptions,
         verbose=verbose,
     )
@@ -133,6 +144,57 @@ def model_hash(api_name: str, model_name: str) -> str:
 
 def entry_id_for_file(file_hash: str, config: IngestConfig) -> str:
     return f"{file_hash}_{model_hash(config.api_name, config.model_name)}"
+
+
+def load_flagged_analysis_files(path: str) -> dict[str, dict]:
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        warnings.warn(f"Could not read flagged analysis file list: {exc}")
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_flagged_analysis_files(path: str, flagged_files: dict[str, dict]) -> None:
+    if not path:
+        return
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(flagged_files, file, indent=2)
+
+
+def entry_file_hash(entry_id: str, metadata: dict) -> str:
+    return str((metadata or {}).get("file_hash") or str(entry_id).split("_", 1)[0])
+
+
+def flag_analysis_file(
+    flagged_files: dict[str, dict],
+    entry_id: str,
+    metadata: dict,
+    reason: str,
+) -> str:
+    file_hash = entry_file_hash(entry_id, metadata)
+    flagged_entry = dict(flagged_files.get(file_hash) or {})
+    flagged_entry.update(
+        {
+            "file_hash": file_hash,
+            "entry_id": entry_id,
+            "file_name": metadata.get("file_name") or "",
+            "file_path": metadata.get("file_path") or "",
+            "last_reason": reason,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    flagged_entry["failure_count"] = int(flagged_entry.get("failure_count") or 0) + 1
+    flagged_files[file_hash] = flagged_entry
+    return file_hash
 
 
 def prepare_descriptions(folder_dict: dict, config: IngestConfig) -> dict:
@@ -348,20 +410,14 @@ def apply_batch_output(
     batch_output: dict[str, dict],
     new_descriptions: dict,
     populated_keys: list[str],
-    failed_keys: list[str],
-    error_details: dict[str, dict[str, str]],
     config: IngestConfig,
-) -> None:
-    missing_reason = "No description was generated for this media item."
+) -> tuple[int, list[str]]:
+    success_count = 0
+    missing_output_keys = []
     for missing_key in batch_keys:
         description = batch_output.get(missing_key)
         if not description:
-            record_description_failures(
-                failed_keys,
-                error_details,
-                [missing_key],
-                missing_reason,
-            )
+            missing_output_keys.append(missing_key)
             continue
 
         metadata = descriptions[missing_key]["metadata"]
@@ -370,6 +426,8 @@ def apply_batch_output(
             "metadata": metadata,
         }
         populated_keys.append(missing_key)
+        success_count += 1
+    return success_count, missing_output_keys
 
 
 def flush_new_descriptions(
@@ -387,10 +445,9 @@ def flush_new_descriptions(
 
 def mark_rate_limited(
     missing_keys: list[str],
-    processed_count: int,
     error_details: dict[str, dict[str, str]],
 ) -> list[str]:
-    rate_limited_keys = missing_keys[processed_count:]
+    rate_limited_keys = list(missing_keys)
     for key in rate_limited_keys:
         error_details[key] = {
             "stage": "description",
@@ -412,15 +469,53 @@ def populate_missing(
     if not missing_keys or not can_describe_missing(config):
         return descriptions, [], [], [], {}
 
+    flagged_files = load_flagged_analysis_files(config.flagged_analysis_path)
+    if not config.include_flagged_files:
+        runnable_missing_keys = []
+        skipped_flagged_keys = []
+        for missing_key in missing_keys:
+            metadata = descriptions.get(missing_key, {}).get("metadata") or {}
+            file_hash = entry_file_hash(missing_key, metadata)
+            if file_hash in flagged_files:
+                skipped_flagged_keys.append(missing_key)
+                continue
+            runnable_missing_keys.append(missing_key)
+        missing_keys = runnable_missing_keys
+    else:
+        skipped_flagged_keys = []
+
+    failed_keys = []
+    error_details = {}
+    if skipped_flagged_keys:
+        for skipped_key in skipped_flagged_keys:
+            metadata = descriptions.get(skipped_key, {}).get("metadata") or {}
+            file_hash = entry_file_hash(skipped_key, metadata)
+            prior_reason = (flagged_files.get(file_hash) or {}).get("last_reason") or ""
+            failed_keys.append(skipped_key)
+            error_details[skipped_key] = {
+                "stage": "description",
+                "reason": (
+                    "Skipping analysis because this file is flagged from a prior isolated failure."
+                    + (f" Last isolated failure: {prior_reason}" if prior_reason else "")
+                ),
+            }
+        print(f"Skipping flagged analysis files: {len(skipped_flagged_keys)}")
+
+    if not missing_keys:
+        return descriptions, [], failed_keys, [], error_details
+
     new_descriptions = {}
     populated_keys = []
-    failed_keys = []
     rate_limited_keys = []
-    error_details: dict[str, dict[str, str]] = {}
+    pending_keys = list(missing_keys)
+    total_runnable_keys = len(missing_keys)
 
-    processed_count = 0
-    for batch_info in iter_missing_batches(descriptions, missing_keys, config):
+    while pending_keys:
+        batch_info = next(iter_missing_batches(descriptions, pending_keys, config), None)
+        if not batch_info:
+            break
         batch_keys = batch_info["keys"]
+        remaining_keys = pending_keys[len(batch_keys) :]
         error_reason = batch_info.get("error_reason")
         if error_reason:
             record_description_failures(
@@ -429,7 +524,7 @@ def populate_missing(
                 batch_keys,
                 error_reason,
             )
-            processed_count += len(batch_keys)
+            pending_keys = remaining_keys
             continue
 
         try:
@@ -441,39 +536,86 @@ def populate_missing(
         except genai.errors.APIError as exc:
             if str(exc.code) == "429":
                 rate_limited_keys = mark_rate_limited(
-                    missing_keys,
-                    processed_count,
+                    pending_keys,
                     error_details,
                 )
                 break
-            print("Received Gemini 'APIError' while running a description batch:", exc)
-            record_description_failures(
-                failed_keys,
-                error_details,
-                batch_keys,
-                str(exc),
+            print(
+                "Received Gemini 'APIError' while running a description batch:",
+                exc,
             )
+            success_count = 0
+            batch_output = {}
+            missing_output_keys = batch_keys
         except Exception as exc:
-            print("Reached an Exception while running a description batch:", exc)
-            record_description_failures(
-                failed_keys,
-                error_details,
+            print(
+                "Reached an Exception while running a description batch:",
+                exc,
+                "| batch_keys=",
                 batch_keys,
-                str(exc),
             )
+            success_count = 0
+            batch_output = {}
+            missing_output_keys = batch_keys
         else:
-            apply_batch_output(
+            success_count, missing_output_keys = apply_batch_output(
                 descriptions,
                 batch_keys,
                 batch_output,
                 new_descriptions,
                 populated_keys,
-                failed_keys,
-                error_details,
                 config,
             )
 
-        processed_count += len(batch_keys)
+        if missing_output_keys:
+            flagged_key = missing_output_keys[0]
+            deferred_keys = missing_output_keys[1:]
+            metadata = descriptions.get(flagged_key, {}).get("metadata") or {}
+            reason = (
+                "Description batch returned an incomplete response. "
+                "This file was flagged as the first unrecovered item from that batch and will be skipped on future analysis runs unless explicitly included."
+            )
+            flagged_hash = flag_analysis_file(
+                flagged_files,
+                flagged_key,
+                metadata,
+                reason,
+            )
+            save_flagged_analysis_files(
+                config.flagged_analysis_path,
+                flagged_files,
+            )
+            failed_keys.append(flagged_key)
+            error_details[flagged_key] = {
+                "stage": "description",
+                "reason": reason,
+            }
+            print(
+                "Flagged analysis file:",
+                metadata.get("file_name") or flagged_key,
+                f"({flagged_hash})",
+            )
+            pending_keys = deferred_keys + remaining_keys
+        else:
+            pending_keys = remaining_keys
+
+        total_success_count = len(populated_keys)
+        print(
+            "Completed description batch:",
+            f"{success_count}/{len(batch_keys)} succeeded in current batch",
+            f"({total_success_count}/{total_runnable_keys} total succeeded so far)",
+        )
+        if callable(config.progress_callback):
+            config.progress_callback(
+                {
+                    "stage": "description_batch",
+                    "completed": total_success_count,
+                    "total": total_runnable_keys,
+                    "remaining": len(pending_keys),
+                    "batch_size": len(batch_keys),
+                    "batch_succeeded": success_count,
+                }
+            )
 
         if len(new_descriptions) >= config.batch_size:
             new_descriptions = flush_new_descriptions(
