@@ -1,4 +1,4 @@
-"""Streamlit entrypoint for the media search UI."""
+"""Streamlit entrypoint for the AfterSight UI."""
 
 from ui.app import main
 

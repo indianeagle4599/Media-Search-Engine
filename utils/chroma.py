@@ -1,7 +1,7 @@
 """
 chroma.py
 
-ChromaDB storage, embedding, indexing, and backend query helpers for media search.
+ChromaDB storage, embedding, indexing, and backend query helpers for AfterSight.
 """
 
 import json, os, multiprocessing as mp
@@ -23,6 +23,7 @@ from utils.retrieval import (
     build_query_specs,
     make_trace_logs,
     normalize_query_text,
+    normalize_search_options,
     summarize_source_debug,
     tokenize_document,
     trace_line,
@@ -85,6 +86,80 @@ def get_ollama_keep_alive() -> str:
     if value is None or not value.strip():
         return DEFAULT_OLLAMA_KEEP_ALIVE
     return value.strip()
+
+
+def normalize_ollama_model_name(model_name: str) -> str:
+    value = str(model_name or "").strip().lower()
+    if not value:
+        return ""
+    if ":" not in value:
+        return value
+    base_name, tag = value.rsplit(":", 1)
+    return base_name if tag == "latest" else value
+
+
+def get_loaded_ollama_model_names() -> set[str]:
+    request = urllib_request.Request(
+        f"{get_ollama_base_url()}/api/ps",
+        method="GET",
+    )
+    try:
+        with urllib_request.urlopen(request) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        message = exc.read().decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"Ollama request to {get_ollama_base_url()}/api/ps failed: "
+            f"HTTP {exc.code} {exc.reason}. {message}"
+        ) from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"Failed to reach Ollama at {get_ollama_base_url()}: {exc}") from exc
+
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return set()
+
+    loaded = set()
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        for field in ("name", "model"):
+            value = str(model.get(field) or "").strip()
+            if value:
+                loaded.add(normalize_ollama_model_name(value))
+    return loaded
+
+
+def active_search_embedding_model_names(search_options: dict | None = None) -> list[str]:
+    normalized_options = normalize_search_options(search_options)
+    enabled_search_types = set(normalized_options["enabled_search_types"])
+    if "semantic" not in enabled_search_types:
+        return []
+
+    enabled_sources = normalized_options["enabled_sources"] or [
+        source_id
+        for source_id, source_config in SearchManifest.SOURCES.items()
+        if source_config.get("enabled_by_default", True)
+    ]
+    disabled_sources = set(normalized_options["disabled_sources"])
+    model_names = []
+    for source_id in enabled_sources:
+        if source_id in disabled_sources:
+            continue
+        source_config = SearchManifest.SOURCES.get(source_id) or {}
+        if "semantic" not in source_config.get("search_types", ()):
+            continue
+        embedding_family = source_config.get("embedding_family")
+        embedding_key = get_embedding_key_for_family(embedding_family)
+        embedding_config = (
+            get_embedding_config_by_key(embedding_key) if embedding_key else None
+        )
+        model_name = normalize_ollama_model_name(
+            str((embedding_config or {}).get("model_name") or "").strip()
+        )
+        if model_name:
+            model_names.append(model_name)
+    return sorted(dict.fromkeys(model_names))
 
 
 class OllamaKeepAliveEmbeddingFunction:

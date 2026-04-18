@@ -1,7 +1,7 @@
 """
 config.py
 
-Shared UI constants and CSS for the Streamlit media search interface.
+Shared UI constants and CSS for the Streamlit AfterSight interface.
 """
 
 DEFAULT_TOP_N = 10
@@ -30,14 +30,16 @@ HEIF_EXTENSIONS = {"heic", "heif"}
 
 APP_CSS = """
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@700;800&display=swap');
+
 .block-container {
   max-width: 1200px;
   padding-top: 0.9rem;
   padding-bottom: 3rem;
 }
 .app-header {
-  margin: 0 auto 0.7rem;
-  padding: 0.95rem 1.15rem 1rem;
+  margin: 0 auto 0.62rem;
+  padding: 2.04rem 1.28rem 0.02rem;
   border: 1px solid rgba(128, 128, 128, 0.18);
   border-radius: 1.2rem;
   background:
@@ -45,82 +47,190 @@ APP_CSS = """
     linear-gradient(135deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.01));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
-.app-header h1 {
+.brandbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+}
+.brandbar__logo {
+  width: clamp(3.6rem, 5.6vw, 4.8rem);
+  height: auto;
+  flex: 0 0 auto;
+  display: block;
+}
+.brandmark {
   margin: 0;
-  letter-spacing: -0.035em;
+  display: inline-block;
+  gap: 0;
+  font-family: "Poppins", "Avenir Next", "Segoe UI", sans-serif;
+  font-size: clamp(2.36rem, 3.84vw, 3.36rem);
+  font-weight: 800;
+  letter-spacing: -0.052em;
+  line-height: 1.1;
+  padding-top: 0.08em;
+  padding-bottom: 0.1em;
+  overflow: visible;
+  text-rendering: geometricPrecision;
+}
+.brandmark__after {
+  color: rgba(248, 248, 251, 0.98);
+}
+.brandmark__sight {
+  background: linear-gradient(
+    138deg,
+    #1f4fff 0%,
+    #315dff 16%,
+    #4b68ff 30%,
+    #6a66ff 46%,
+    #8b5cf6 62%,
+    #9851ff 78%,
+    #b65cff 100%
+  );
+  background-size: 480% 480%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 0 0 22px rgba(124, 58, 237, 0.12);
+  animation: aftersight-sight-glow 6.8s linear infinite;
+}
+@keyframes aftersight-sight-glow {
+  0% {
+    background-position: 82% 16%;
+    filter: brightness(0.985) saturate(0.985);
+  }
+  32% {
+    background-position: 64% 32%;
+    filter: brightness(1) saturate(1);
+  }
+  50% {
+    background-position: 48% 48%;
+    filter: brightness(1.045) saturate(1.045);
+  }
+  68% {
+    background-position: 30% 66%;
+    filter: brightness(1.005) saturate(1.005);
+  }
+  100% {
+    background-position: 82% 16%;
+    filter: brightness(0.985) saturate(0.985);
+  }
 }
 .muted {
   color: rgba(128, 128, 128, 0.98);
 }
-.search-hint {
-  margin: 0.5rem 0 0.95rem;
-  text-align: center;
-  font-size: 0.86rem;
+.search-toolbar-status {
+  margin: 0;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  min-height: 1.98rem;
+  padding-left: 0.84rem;
+}
+.search-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  font-size: 0.77rem;
+  line-height: 1;
+  color: rgba(143, 149, 162, 0.96);
+  white-space: nowrap;
+}
+.search-status__dot {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  box-shadow: 0 0 0 0.12rem rgba(255, 255, 255, 0.06);
+}
+.search-status--loaded .search-status__dot {
+  background: #34c759;
+}
+.search-status--offloaded .search-status__dot {
+  background: #9ca3af;
+}
+.search-status--unavailable .search-status__dot {
+  background: #ef4444;
 }
 div[data-testid="stForm"] {
   border: 1px solid rgba(128, 128, 128, 0.18);
-  border-radius: 1rem;
-  padding: 0.55rem 0.74rem 0.58rem;
+  border-radius: 1.08rem;
+  margin-top: -0.18rem;
+  padding: 0.68rem 0.92rem 0.64rem;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.01)),
     rgba(128, 128, 128, 0.045);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 div[data-testid="stForm"] div[data-testid="stTextInput"] {
-  margin-bottom: 0.05rem;
+  margin-bottom: 0.1rem;
 }
 div[data-testid="stForm"] div[data-testid="stTextInput"] input {
   border: none;
   background: transparent;
-  font-size: 1rem;
-  padding: 0.5rem 0.3rem 0.45rem 0.72rem;
+  font-size: 1.05rem;
+  padding: 0.58rem 0.3rem 0.56rem 0.88rem;
 }
 div[data-testid="stForm"] div[data-testid="stTextInput"] > div {
-  border: none;
-  background: transparent;
+  border: 1px solid rgba(128, 128, 128, 0.1);
+  border-radius: 0.88rem;
+  background: rgba(255, 255, 255, 0.045);
   box-shadow: none;
 }
 div[data-testid="stForm"] div[data-testid="stHorizontalBlock"] {
-  align-items: end;
-  gap: 0.38rem;
+  align-items: center;
+  gap: 0.12rem;
+  margin-top: 0;
+  padding-top: 0.04rem;
+  border-top: none;
 }
 .st-key-search_submit,
+.st-key-search_clear,
 .st-key-search_history,
 .st-key-search_configure {
-  align-self: end;
+  align-self: center;
 }
-.st-key-search_history {
-  order: 1;
-}
+.st-key-search_submit,
+.st-key-search_clear,
+.st-key-search_history,
 .st-key-search_configure {
-  order: 2;
-}
-.st-key-search_submit {
-  order: 3;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
 }
 .st-key-search_submit button,
+.st-key-search_clear button,
 .st-key-search_history button,
 .st-key-search_configure button {
-  min-height: 2.18rem;
-  height: 2.18rem;
-  border-radius: 0.8rem;
-  padding: 0 0.72rem;
-  font-size: 0.98rem;
+  min-height: 2.08rem;
+  height: 2.08rem;
+  border-radius: 0.78rem;
+  padding: 0 0.6rem;
+  font-size: 0.88rem;
   line-height: 1;
   box-shadow: none;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
   transition:
     border-color 140ms ease,
     background 140ms ease,
     transform 140ms ease;
 }
+.st-key-search_submit button p,
+.st-key-search_clear button p,
+.st-key-search_history button p,
+.st-key-search_configure button p {
+  margin: 0 !important;
+  line-height: 1 !important;
+}
+.st-key-search_clear button,
 .st-key-search_history button,
 .st-key-search_configure button {
-  width: 2.18rem;
+  width: 2.08rem;
   border: 1px solid rgba(128, 128, 128, 0.2) !important;
   background: rgba(128, 128, 128, 0.08) !important;
 }
 .st-key-search_submit button {
-  min-width: 2.5rem;
+  min-width: 2.32rem;
   border: 1px solid rgba(99, 102, 241, 0.28) !important;
   background: linear-gradient(
     135deg,
@@ -130,14 +240,74 @@ div[data-testid="stForm"] div[data-testid="stHorizontalBlock"] {
   color: #ffffff !important;
 }
 .st-key-search_submit button:hover,
+.st-key-search_clear button:hover,
 .st-key-search_history button:hover,
 .st-key-search_configure button:hover {
   transform: translateY(-1px);
 }
 .empty-state {
-  margin: 1.15rem 0 0;
+  margin: 0.12rem 0 0;
   text-align: center;
-  font-size: 0.95rem;
+  font-size: 0.88rem;
+}
+.st-key-page {
+  margin-bottom: -0.08rem;
+}
+.results-summary {
+  margin: 0;
+  color: rgba(231, 233, 237, 0.95);
+  font-size: 0.9rem;
+  line-height: 1.25;
+  min-height: 2rem;
+  display: flex;
+  align-items: center;
+}
+.results-view-label {
+  margin: 0;
+  color: rgba(231, 233, 237, 0.95);
+  font-size: 0.9rem;
+  line-height: 1;
+  min-height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 0.08rem;
+}
+.st-key-search_results_view {
+  margin-top: 0;
+  margin-bottom: 0.08rem;
+}
+.st-key-search_results_view [data-testid="stRadio"] {
+  margin: 0;
+}
+.st-key-search_results_view div[role="radiogroup"] {
+  min-height: 2rem;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  gap: 0.48rem;
+}
+.st-key-search_results_view label {
+  white-space: nowrap;
+  margin-bottom: 0 !important;
+}
+.result-list-divider {
+  height: 1px;
+  margin: 0.42rem 0 0.62rem;
+  background: rgba(255, 255, 255, 0.12);
+}
+@media (max-width: 1180px) {
+  .results-view-label {
+    justify-content: flex-start;
+    min-height: auto;
+    padding-top: 0.08rem;
+  }
+  .st-key-search_results_view div[role="radiogroup"] {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 0.32rem;
+  }
 }
 .result-card {
   position: relative;

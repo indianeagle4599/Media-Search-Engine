@@ -27,9 +27,9 @@ from ui.data import (
 )
 from ui.formatting import get_entry_display_fields, get_summary, to_jsonable
 from ui.history import save_feedback
-from ui.media import get_thumbnail_data_uri, render_media
+from ui.media import get_preview_data_uri, get_thumbnail_data_uri, render_media
 from utils.ingest import STATUS_DESCRIBED, STATUS_INDEXED, STATUS_STORED
-from utils.retrieval import SearchManifest
+from utils.retrieval import SearchManifest, normalize_search_options
 
 
 DETAIL_TRIGGER_KEY_PREFIX = "result_card_detail_trigger_"
@@ -81,6 +81,70 @@ def source_label_map() -> dict[str, str]:
     return {source_id: label for source_id, label in manifest_source_options()}
 
 
+def default_enabled_source_ids() -> list[str]:
+    return [
+        source_id
+        for source_id, config in SearchManifest.SOURCES.items()
+        if config.get("enabled_by_default", True)
+    ]
+
+
+def search_options_from_state(state: dict | None = None) -> dict:
+    state = state or st.session_state
+    normalized = normalize_search_options(
+        {
+            "preset": state.get("search_preset", SearchManifest.DEFAULT_PRESET),
+            "focus": {
+                "words": int(
+                    state.get(
+                        "search_focus_words", SearchManifest.DEFAULT_FOCUS["words"]
+                    )
+                ),
+                "meaning": int(
+                    state.get(
+                        "search_focus_meaning",
+                        SearchManifest.DEFAULT_FOCUS["meaning"],
+                    )
+                ),
+                "text": int(
+                    state.get("search_focus_text", SearchManifest.DEFAULT_FOCUS["text"])
+                ),
+                "time": int(
+                    state.get("search_focus_time", SearchManifest.DEFAULT_FOCUS["time"])
+                ),
+            },
+            "enabled_sources": list(
+                state.get("search_enabled_sources", default_enabled_source_ids())
+            ),
+            "enabled_search_types": list(
+                state.get(
+                    "search_enabled_search_types",
+                    list(SearchManifest.DEFAULT_ENABLED_SEARCH_TYPES),
+                )
+            ),
+            "capabilities": list(state.get("search_capabilities", [])),
+        }
+    )
+    if not normalized["enabled_sources"]:
+        normalized["enabled_sources"] = default_enabled_source_ids()
+    return normalized
+
+
+def sync_search_settings_state(state: dict | None = None) -> dict:
+    state = state or st.session_state
+    normalized = search_options_from_state(state)
+    focus = normalized["focus"]
+    state["search_preset"] = normalized["preset"]
+    state["search_focus_words"] = int(focus["words"])
+    state["search_focus_meaning"] = int(focus["meaning"])
+    state["search_focus_text"] = int(focus["text"])
+    state["search_focus_time"] = int(focus["time"])
+    state["search_enabled_sources"] = list(normalized["enabled_sources"])
+    state["search_enabled_search_types"] = list(normalized["enabled_search_types"])
+    state["search_capabilities"] = list(normalized["capabilities"])
+    return normalized
+
+
 def preset_focus_values(preset: str | None = None) -> dict[str, int]:
     preset_key = str(
         preset or st.session_state.get("search_preset") or SearchManifest.DEFAULT_PRESET
@@ -110,12 +174,10 @@ def reset_search_settings() -> None:
     st.session_state["search_preset"] = SearchManifest.DEFAULT_PRESET
     apply_preset_focus()
     st.session_state["search_include_debug"] = False
-    st.session_state["search_enabled_search_types"] = list(SearchManifest.SEARCH_TYPES)
-    st.session_state["search_enabled_sources"] = [
-        source_id
-        for source_id, config in SearchManifest.SOURCES.items()
-        if config.get("enabled_by_default", True)
-    ]
+    st.session_state["search_enabled_search_types"] = list(
+        SearchManifest.DEFAULT_ENABLED_SEARCH_TYPES
+    )
+    st.session_state["search_enabled_sources"] = default_enabled_source_ids()
     st.session_state["search_capabilities"] = []
     st.session_state["filter_media_type"] = "All"
     st.session_state["filter_result_sources"] = []
@@ -127,10 +189,25 @@ def reset_search_settings() -> None:
 
 def render_app_shell() -> None:
     st.markdown(APP_CSS, unsafe_allow_html=True)
+    logo_html = ""
+    logo_path = Path("assets/AfterSight Logo.png")
+    if logo_path.is_file():
+        logo_src = get_preview_data_uri(
+            str(logo_path),
+            logo_path.stat().st_mtime_ns,
+        )
+        logo_html = (
+            f'<img class="brandbar__logo" src="{logo_src}" ' 'alt="AfterSight logo">'
+        )
     st.markdown(
-        """
+        f"""
         <div class="app-header">
-          <h1>Media Search</h1>
+          <div class="brandbar">
+            {logo_html}
+            <div class="brandmark" aria-label="AfterSight">
+              <span class="brandmark__after">After</span><span class="brandmark__sight">Sight</span>
+            </div>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -146,6 +223,7 @@ def dialog_options(**kwargs) -> dict:
 
 
 def render_search_settings_body() -> None:
+    sync_search_settings_state()
     source_labels = source_label_map()
     source_ids = list(source_labels)
 
@@ -516,7 +594,7 @@ def render_indexed_detail_body(
 
     with st.expander("Description", expanded=False):
         description = entry.get("description") or {}
-        if described:
+        if entry_has_description(entry):
             st.json(to_jsonable(description), expanded=False)
         else:
             st.info("No generated description yet.")
@@ -731,10 +809,13 @@ def render_media_list_row(
     button_key_prefix: str = "result_list_detail",
     preview_ratio: float = 1.0,
     preview_width: int = 96,
+    action_ratio: float = 1.15,
+    gap: str = "medium",
+    compact: bool = False,
 ) -> None:
     preview_col, body_col, action_col = st.columns(
-        [preview_ratio, 5.95 - preview_ratio, 1.15],
-        gap="medium",
+        [preview_ratio, 5.95 - preview_ratio, action_ratio],
+        gap=gap,
     )
     with preview_col:
         preview_width = max(48, int(preview_width or 96))
@@ -760,7 +841,10 @@ def render_media_list_row(
                 args=(detail_entry_id,),
                 width="stretch",
             )
-    st.divider()
+    if compact:
+        st.markdown('<div class="result-list-divider"></div>', unsafe_allow_html=True)
+    else:
+        st.divider()
 
 
 def render_result_card(
@@ -844,8 +928,11 @@ def render_results_list(
             detail_entry_id=entry_id,
             detail_title=file_name,
             button_key_prefix="search_result_list_detail",
-            preview_ratio=1.3 if detailed else 0.75,
-            preview_width=200 if detailed else 72,
+            preview_ratio=1.3 if detailed else 0.95,
+            preview_width=200 if detailed else 84,
+            action_ratio=1.15 if detailed else 0.95,
+            gap="medium" if detailed else "small",
+            compact=not detailed,
         )
 
 

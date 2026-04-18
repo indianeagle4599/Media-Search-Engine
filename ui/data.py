@@ -12,8 +12,10 @@ import streamlit as st
 from ui.config import UPLOAD_ROOT
 from utils.ingest import STATUS_DESCRIBED, STATUS_INDEXED, STATUS_STORED
 from utils.chroma import (
+    active_search_embedding_model_names,
     delete_entry_ids,
     get_chroma_client as create_chroma_client,
+    get_loaded_ollama_model_names,
     query_collections,
 )
 from utils.mongo import (
@@ -69,6 +71,46 @@ def get_query_results(
         )
     result = ranked_queries.get(normalized_query) or {}
     return result.get("ids", []), result
+
+
+def get_search_model_status(
+    search_options: dict | None = None,
+    refresh_token: int = 0,
+) -> dict:
+    del refresh_token
+    active_models = active_search_embedding_model_names(search_options)
+    if not active_models:
+        return {
+            "state": "offloaded",
+            "label": "Search model offloaded",
+            "detail": "No semantic embedding model is active for the current settings.",
+            "models": [],
+        }
+
+    try:
+        loaded_models = get_loaded_ollama_model_names()
+    except Exception as exc:
+        return {
+            "state": "unavailable",
+            "label": "Search model unavailable",
+            "detail": str(exc),
+            "models": active_models,
+        }
+
+    if all(model_name in loaded_models for model_name in active_models):
+        return {
+            "state": "loaded",
+            "label": "Search model loaded",
+            "detail": ", ".join(active_models),
+            "models": active_models,
+        }
+
+    return {
+        "state": "offloaded",
+        "label": "Search model offloaded",
+        "detail": ", ".join(active_models),
+        "models": active_models,
+    }
 
 
 def manifest_source_options() -> list[tuple[str, str]]:

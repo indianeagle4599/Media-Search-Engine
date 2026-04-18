@@ -1,1 +1,1 @@
-"""Streamlit UI package for media search."""
+"""Streamlit UI package for AfterSight."""

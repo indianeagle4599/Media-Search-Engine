@@ -4,6 +4,7 @@ app.py
 Streamlit application entrypoint for search, upload, gallery, and Chroma views.
 """
 
+import html
 from time import perf_counter
 
 from dotenv import load_dotenv
@@ -11,6 +12,9 @@ import streamlit as st
 
 from ui.chroma_viewer import render_chroma_viewer
 from ui.components import (
+    default_enabled_source_ids,
+    sync_search_settings_state,
+    search_options_from_state,
     clear_selected_entry_id,
     detail_dialog,
     dialog_options,
@@ -24,6 +28,7 @@ from ui.components import (
 from ui.config import DEFAULT_TOP_N
 from ui.config import FILTERED_SEARCH_MULTIPLIER, MAX_FILTERED_CANDIDATES
 from ui.data import get_entries, get_query_results
+from ui.data import get_search_model_status
 from ui.filters import (
     active_filters_from_state,
     apply_result_filters,
@@ -40,6 +45,8 @@ from ui.upload import render_upload_page
 from utils.retrieval import SearchManifest
 
 EMPTY_STATE = "Describe the photo, video, or text you want to find."
+SEARCH_COLUMNS = [0.8, 5.4, 0.8]
+RESULTS_COLUMNS = [0.3, 6.4, 0.3]
 
 
 def initialize_state() -> None:
@@ -54,7 +61,7 @@ def initialize_state() -> None:
         "search_focus_time": SearchManifest.DEFAULT_FOCUS["time"],
         "search_include_debug": False,
         "search_enabled_search_types": list(SearchManifest.SEARCH_TYPES),
-        "search_enabled_sources": list(SearchManifest.SOURCES),
+        "search_enabled_sources": default_enabled_source_ids(),
         "search_capabilities": [],
         "filter_media_type": "All",
         "filter_result_sources": [],
@@ -77,6 +84,7 @@ def initialize_state() -> None:
         "last_search_response": {},
         "last_search_plan": {},
         "last_search_options": {},
+        "search_status_refresh_token": 0,
     }.items():
         st.session_state.setdefault(key, value)
 
@@ -158,7 +166,7 @@ def restore_search_state(item: dict) -> None:
         search_options.get("enabled_search_types") or SearchManifest.SEARCH_TYPES
     )
     st.session_state["search_enabled_sources"] = list(
-        search_options.get("enabled_sources") or SearchManifest.SOURCES
+        search_options.get("enabled_sources") or default_enabled_source_ids()
     )
     st.session_state["search_capabilities"] = list(
         search_options.get("capabilities") or []
@@ -172,46 +180,13 @@ def restore_search_state(item: dict) -> None:
     st.session_state["filter_date_to"] = filters.get("date_to", "")
 
 
-def search_options_from_state() -> dict:
-    return {
-        "preset": st.session_state.get("search_preset", SearchManifest.DEFAULT_PRESET),
-        "focus": {
-            "words": int(
-                st.session_state.get(
-                    "search_focus_words", SearchManifest.DEFAULT_FOCUS["words"]
-                )
-            ),
-            "meaning": int(
-                st.session_state.get(
-                    "search_focus_meaning",
-                    SearchManifest.DEFAULT_FOCUS["meaning"],
-                )
-            ),
-            "text": int(
-                st.session_state.get(
-                    "search_focus_text", SearchManifest.DEFAULT_FOCUS["text"]
-                )
-            ),
-            "time": int(
-                st.session_state.get(
-                    "search_focus_time", SearchManifest.DEFAULT_FOCUS["time"]
-                )
-            ),
-        },
-        "enabled_sources": list(
-            st.session_state.get("search_enabled_sources", list(SearchManifest.SOURCES))
-        ),
-        "enabled_search_types": list(
-            st.session_state.get(
-                "search_enabled_search_types", list(SearchManifest.SEARCH_TYPES)
-            )
-        ),
-        "capabilities": list(st.session_state.get("search_capabilities", [])),
-    }
+def render_search_controls() -> tuple[bool, object]:
+    if st.session_state.pop("search_clear_requested", False):
+        clear_search_results(clear_query=True)
 
-
-def render_search_controls() -> bool:
-    _, search_col, _ = st.columns([0.8, 5.4, 0.8])
+    submitted = False
+    clear_requested = False
+    _, search_col, _ = st.columns(SEARCH_COLUMNS)
     with search_col:
         with st.form("search_form", clear_on_submit=False):
             st.text_input(
@@ -221,51 +196,129 @@ def render_search_controls() -> bool:
                 label_visibility="collapsed",
             )
 
-            _, search_button_col, history_col, settings_col = st.columns(
-                [5.6, 0.72, 0.56, 0.56],
-                gap="small",
-            )
-            with search_button_col:
-                submitted = st.form_submit_button(
-                    "↗",
-                    type="primary",
-                    key="search_submit",
-                    help="Run search",
+            status_col, actions_col = st.columns([3.62, 1.38], gap="small")
+            with status_col:
+                status_container = st.empty()
+            with actions_col:
+                search_button_col, clear_col, history_col, settings_col = st.columns(
+                    [0.92, 0.62, 0.62, 0.62],
+                    gap="small",
                 )
-            with history_col:
-                open_history = st.form_submit_button(
-                    "↺",
-                    key="search_history",
-                    help="Search history",
-                )
-            with settings_col:
-                configure = st.form_submit_button(
-                    "⚙",
-                    key="search_configure",
-                    help="Configure search",
-                )
-
+                with search_button_col:
+                    submitted = st.form_submit_button(
+                        "↗",
+                        type="primary",
+                        key="search_submit",
+                        help="Run search",
+                    )
+                with clear_col:
+                    clear_requested = st.form_submit_button(
+                        "✕",
+                        key="search_clear",
+                        help="Clear query and results",
+                    )
+                with history_col:
+                    open_history = st.form_submit_button(
+                        "≣",
+                        key="search_history",
+                        help="Search history",
+                    )
+                with settings_col:
+                    configure = st.form_submit_button(
+                        "⚙",
+                        key="search_configure",
+                        help="Configure search",
+                    )
         if open_history:
             search_history_dialog()
         if configure:
             search_settings_dialog()
+        if clear_requested:
+            clear_selected_entry_id()
+            st.session_state["search_clear_requested"] = True
+            st.rerun()
 
-        filters = active_filters_from_state(st.session_state)
-        filter_note = " with filters" if filters_are_active(filters) else ""
-        st.markdown(
-            f'<div class="search-hint muted">Retrieving top '
-            f'{int(st.session_state["top_n"])} result(s){filter_note}</div>',
-            unsafe_allow_html=True,
-        )
-
-    return submitted
+    return submitted, status_container
 
 
 def render_empty_state() -> None:
+    return
+
+
+def clear_search_results(*, clear_query: bool) -> None:
+    clear_selected_entry_id()
+    if clear_query:
+        st.session_state["search_query"] = ""
+    st.session_state["last_query"] = ""
+    st.session_state["last_result_ids"] = []
+    st.session_state["last_result_entries"] = {}
+    st.session_state["last_result_scores"] = []
+    st.session_state["last_result_ranks"] = {}
+    st.session_state["last_result_score_by_id"] = {}
+    st.session_state["last_result_items"] = []
+    st.session_state["last_result_item_by_id"] = {}
+    st.session_state["last_search_response"] = {}
+    st.session_state["last_search_plan"] = {}
+    st.session_state["last_search_options"] = {}
+    st.session_state["last_search_ms"] = None
+    st.session_state["last_candidate_count"] = 0
+    st.session_state["last_filters_active"] = False
+
+
+def render_search_model_status_body(
+    search_options: dict,
+    refresh_token: int = 0,
+) -> None:
+    model_status = get_search_model_status(
+        search_options=search_options,
+        refresh_token=refresh_token,
+    )
     st.markdown(
-        f'<div class="empty-state muted">{EMPTY_STATE}</div>',
+        '<div class="search-toolbar-status">'
+        f'<div class="search-status search-status--{html.escape(model_status["state"])}" '
+        f'title="{html.escape(model_status["detail"])}">'
+        '<span class="search-status__dot"></span>'
+        f'<span>{html.escape(model_status["label"])}</span>'
+        "</div>"
+        "</div>",
         unsafe_allow_html=True,
     )
+
+
+if hasattr(st, "fragment"):
+
+    @st.fragment(run_every="4s")
+    def render_search_model_status_widget(
+        search_options: dict,
+        refresh_token: int = 0,
+    ) -> None:
+        render_search_model_status_body(
+            search_options=search_options,
+            refresh_token=refresh_token,
+        )
+
+else:
+
+    def render_search_model_status_widget(
+        search_options: dict,
+        refresh_token: int = 0,
+    ) -> None:
+        render_search_model_status_body(
+            search_options=search_options,
+            refresh_token=refresh_token,
+        )
+
+
+def render_search_model_status(
+    status_container,
+    search_options: dict,
+    refresh_token: int = 0,
+) -> None:
+    with status_container.container():
+        render_search_model_status_widget(
+            search_options=search_options,
+            refresh_token=refresh_token,
+        )
 
 
 def search(
@@ -294,7 +347,7 @@ def candidate_count(top_n: int, filters: dict) -> int:
 
 def main() -> None:
     load_dotenv()
-    st.set_page_config(page_title="Media Search", layout="wide")
+    st.set_page_config(page_title="AfterSight", layout="wide")
     initialize_state()
     render_app_shell()
     page = render_navbar()
@@ -316,9 +369,9 @@ def main() -> None:
         clear_selected_entry_id()
         with st.spinner("Loading saved results..."):
             restore_search_state(history_item)
+            search_options = sync_search_settings_state()
             replay_query = st.session_state["search_query"].strip()
             replay_filters = active_filters_from_state(st.session_state)
-            search_options = search_options_from_state()
             ids, entries, scores, result, elapsed_ms = search(
                 query=replay_query,
                 top_n=candidate_count(int(st.session_state["top_n"]), replay_filters),
@@ -350,16 +403,19 @@ def main() -> None:
             last_search_response=result,
             last_search_plan=result.get("search_plan") or {},
             last_search_options=search_options,
+            search_status_refresh_token=(
+                int(st.session_state.get("search_status_refresh_token", 0)) + 1
+            ),
         )
 
-    submitted = render_search_controls()
+    submitted, search_status_container = render_search_controls()
 
     if submitted:
         clear_selected_entry_id()
+        search_options = sync_search_settings_state()
         query = st.session_state["search_query"].strip()
         top_n = int(st.session_state["top_n"])
         filters = active_filters_from_state(st.session_state)
-        search_options = search_options_from_state()
         if not query:
             st.warning("Enter a query first.")
             render_empty_state()
@@ -410,7 +466,16 @@ def main() -> None:
             last_search_response=result,
             last_search_plan=result.get("search_plan") or {},
             last_search_options=search_options,
+            search_status_refresh_token=(
+                int(st.session_state.get("search_status_refresh_token", 0)) + 1
+            ),
         )
+
+    render_search_model_status(
+        status_container=search_status_container,
+        search_options=search_options_from_state(),
+        refresh_token=int(st.session_state.get("search_status_refresh_token", 0)),
+    )
 
     ids = st.session_state.get("last_result_ids", [])
     entries = st.session_state.get("last_result_entries", {})
@@ -432,30 +497,47 @@ def main() -> None:
             else f" in {elapsed_ms:.0f}ms"
         )
 
-    st.caption(
-        f"Showing {len(ids)} result(s) for "
-        f"{st.session_state.get('last_query', '')}{timing}."
-    )
-    if st.session_state.get("last_filters_active"):
-        st.caption(
-            f"Filters were applied to "
-            f"{st.session_state.get('last_candidate_count', len(ids))} candidate(s)."
-        )
-    result_view = st.radio(
-        "View",
-        ["Grid", "Compact list", "Details list"],
-        horizontal=True,
-        key="search_results_view",
-    )
-    if result_view == "Grid":
-        render_results_grid(ids=ids, entries=entries, scores=scores)
-    else:
-        render_results_list(
-            ids=ids,
-            entries=entries,
-            scores=scores,
-            detailed=result_view == "Details list",
-        )
+    _, results_col, _ = st.columns(RESULTS_COLUMNS)
+    with results_col:
+        summary_suffix = ""
+        if st.session_state.get("last_filters_active"):
+            summary_suffix = (
+                f" · filtered from "
+                f"{st.session_state.get('last_candidate_count', len(ids))} candidate(s)"
+            )
+        summary_col, view_col = st.columns([3.45, 2.55], gap="small")
+        with summary_col:
+            st.markdown(
+                '<div class="results-summary">'
+                f"Showing {len(ids)} result(s) for "
+                f"{st.session_state.get('last_query', '')}{timing}{summary_suffix}."
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        with view_col:
+            label_col, options_col = st.columns([0.22, 1.78], gap="small")
+            with label_col:
+                st.markdown(
+                    '<div class="results-view-label">View</div>',
+                    unsafe_allow_html=True,
+                )
+            with options_col:
+                result_view = st.radio(
+                    "View",
+                    ["Grid", "Compact list", "Details list"],
+                    horizontal=True,
+                    key="search_results_view",
+                    label_visibility="collapsed",
+                )
+        if result_view == "Grid":
+            render_results_grid(ids=ids, entries=entries, scores=scores)
+        else:
+            render_results_list(
+                ids=ids,
+                entries=entries,
+                scores=scores,
+                detailed=result_view == "Details list",
+            )
     render_search_debug_panel(st.session_state.get("last_search_response"))
 
     selected_entry_id = get_selected_entry_id()
