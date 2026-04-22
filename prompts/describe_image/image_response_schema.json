@@ -1,0 +1,86 @@
+{
+  "type": "object",
+  "required": ["content", "context"],
+  "properties": {
+    "content": {
+      "type": "object",
+      "required": [
+        "summary",
+        "objects",
+        "text",
+        "vibe",
+        "background",
+        "detailed_description",
+        "miscellaneous"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "objects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "text": {
+          "type": "string"
+        },
+        "vibe": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "background": {
+          "type": "string"
+        },
+        "detailed_description": {
+          "type": "string"
+        },
+        "miscellaneous": {
+          "type": "string"
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "required": [
+        "primary_category",
+        "intent",
+        "composition",
+        "estimated_date",
+        "event",
+        "analysis",
+        "metadata_relevance",
+        "other_details"
+      ],
+      "properties": {
+        "primary_category": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "composition": {
+          "type": "string"
+        },
+        "estimated_date": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string"
+        },
+        "analysis": {
+          "type": "string"
+        },
+        "metadata_relevance": {
+          "type": "string"
+        },
+        "other_details": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

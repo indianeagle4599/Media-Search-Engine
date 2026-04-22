@@ -1,5 +1,5 @@
 # ITEM __item_index__
-This metadata applies only to the next image.
+This metadata applies only to the next media item.
 Return the exact same `entry_id` in the output.
 
 <item>

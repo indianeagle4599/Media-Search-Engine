@@ -1,183 +1,39 @@
 """
 prompt.py
 
-Contains utilities to create modular and versatile prompts and perform the necessary API calls to get relevant outputs as text or embeddings as relevant.
+Batch image prompt preparation and response handling.
 """
 
-import os, warnings, json
-from pathlib import Path
-from functools import lru_cache
+import json, warnings
 from typing import Any
 
 from google import genai
 
-from dotenv import load_dotenv
 from utils.io import get_analysis_image_bytes
+from utils.prompt_assembly import (
+    batch_prompt_sections as assemble_batch_prompt_sections,
+    batch_response_schema,
+    dummy_response,
+    render_prompt_template,
+)
+from utils.prompt_parsing import (
+    normalize_response_json_text,
+    salvage_partial_batch_payload,
+)
 
-load_dotenv()
-REPO_ROOT = os.getenv("REPO_ROOT")
+
 REQUEST_TEXT_OVERHEAD_BYTES = 64
 REQUEST_INLINE_PART_OVERHEAD_BYTES = 128
 REQUEST_CONTAINER_OVERHEAD_BYTES = 512
-TEMP_BATCH_RESPONSE_PATH = Path("json_outs/temp_batch_response.json")
+IMAGE_TASK_TYPE = "describe_image"
 
 
-def render_prompt_template(template: str, attachments_dict: dict) -> str:
-    for attachment, value in attachments_dict.items():
-        template = template.replace(f"__{attachment}__", value)
-    return template
-
-
-def normalize_response_json_text(raw_text: str) -> str:
-    text = str(raw_text or "").strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines:
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-
-    first_object = text.find("{")
-    first_array = text.find("[")
-    starts = [index for index in (first_object, first_array) if index >= 0]
-    if starts:
-        start = min(starts)
-        end = max(text.rfind("}"), text.rfind("]"))
-        if end >= start:
-            text = text[start : end + 1]
-
-    cleaned = []
-    in_string = False
-    escaped = False
-    for char in text:
-        if escaped:
-            cleaned.append(char)
-            escaped = False
-            continue
-        if char == "\\":
-            cleaned.append(char)
-            escaped = True
-            continue
-        if char == '"':
-            cleaned.append(char)
-            in_string = not in_string
-            continue
-        if in_string and ord(char) < 32:
-            cleaned.append(
-                {
-                    "\n": "\\n",
-                    "\r": "\\r",
-                    "\t": "\\t",
-                }.get(char, " ")
-            )
-            continue
-        cleaned.append(char)
-    return "".join(cleaned)
-
-
-def salvage_partial_batch_payload(response_text: str) -> dict:
-    def iter_closed_objects(text: str, start_index: int):
-        index = start_index
-        while index < len(text):
-            char = text[index]
-            if char in " \t\r\n,":
-                index += 1
-                continue
-            if char == "]":
-                return
-            if char != "{":
-                index += 1
-                continue
-
-            depth = 0
-            in_string = False
-            escaped = False
-            object_start = index
-            while index < len(text):
-                current = text[index]
-                if escaped:
-                    escaped = False
-                elif current == "\\":
-                    escaped = True
-                elif current == '"':
-                    in_string = not in_string
-                elif not in_string:
-                    if current == "{":
-                        depth += 1
-                    elif current == "}":
-                        depth -= 1
-                        if depth == 0:
-                            yield text[object_start : index + 1]
-                            index += 1
-                            break
-                index += 1
-            else:
-                return
-
-    results_key = response_text.find('"results"')
-    array_start = response_text.find("[", results_key if results_key >= 0 else 0)
-    if array_start < 0:
-        return {}
-
-    salvaged_items = []
-    for object_text in iter_closed_objects(response_text, array_start + 1):
-        try:
-            item = json.loads(object_text)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(item, dict):
-            salvaged_items.append(item)
-
-    if salvaged_items:
-        print(
-            f"Salvaged {len(salvaged_items)} complete item(s) from partial batch response."
-        )
-    return {"results": salvaged_items}
-
-
-@lru_cache(maxsize=16)
-def batch_prompt_sections(batch_size: int) -> dict:
-    prompt_root = os.path.join(REPO_ROOT, "prompts", "describe_image_batch")
-    prompt_sections = {}
-    for section in ("admin", "prompt", "item"):
-        section_path = os.path.join(prompt_root, f"{section}.md")
-        try:
-            with open(section_path, "r") as file:
-                prompt_sections[section] = render_prompt_template(
-                    file.read(),
-                    {"batch_size": str(batch_size)},
-                )
-        except FileNotFoundError:
-            print(
-                f'Found nothing at "{section_path}" for prompt section named: {section}.'
-            )
-    return prompt_sections
+def batch_prompt_sections(batch_size: int) -> dict[str, str]:
+    return assemble_batch_prompt_sections(IMAGE_TASK_TYPE, batch_size)
 
 
 def dummy_description(entry_id: str, metadata: dict) -> dict:
-    filename = metadata.get("file_name") or entry_id
-    return {
-        "content": {
-            "summary": f"Dummy batch description for {filename}",
-            "objects": [],
-            "text": "",
-            "vibe": [],
-            "background": "",
-            "detailed_description": "Generated locally to validate batch processing.",
-            "miscellaneous": "",
-        },
-        "context": {
-            "primary_category": "",
-            "intent": "",
-            "composition": "",
-            "estimated_date": "",
-            "event": "Dummy validation run",
-            "analysis": "No Gemini request was made.",
-            "metadata_relevance": "",
-            "other_details": "",
-        },
-    }
+    return dummy_response(IMAGE_TASK_TYPE, entry_id, metadata)
 
 
 def prepare_batch_entry(
@@ -233,6 +89,7 @@ def build_batch_request(
     batch_request = {
         "entries": prepared_entries,
         "prompt_sections": prompt_sections,
+        "response_schema": batch_response_schema(IMAGE_TASK_TYPE),
         "expected_entry_ids": {entry["entry_id"] for entry in prepared_entries},
         "contents": [],
         "request_bytes": 0,
@@ -241,19 +98,18 @@ def build_batch_request(
         return batch_request
 
     batch_request["request_bytes"] = (
-        len(str(prompt_sections.get("admin", "")).encode("utf-8"))
+        len(prompt_sections["admin"].encode("utf-8"))
         + REQUEST_TEXT_OVERHEAD_BYTES
-        + len(str(prompt_sections.get("prompt", "")).encode("utf-8"))
+        + len(prompt_sections["prompt"].encode("utf-8"))
         + REQUEST_TEXT_OVERHEAD_BYTES
         + REQUEST_CONTAINER_OVERHEAD_BYTES
     )
     if prepared_entries:
         batch_request["contents"].append(prompt_sections["prompt"])
 
-    item_template = prompt_sections.get("item", "")
     for index, entry in enumerate(prepared_entries, start=1):
         item_prompt = render_prompt_template(
-            item_template,
+            prompt_sections["item"],
             {
                 "item_index": str(index),
                 "entry_id": entry["entry_id"],
@@ -271,23 +127,16 @@ def build_batch_request(
         )
         batch_request["contents"].append(item_prompt)
         batch_request["contents"].append(
-            genai.types.Part.from_bytes(
-                data=image_bytes,
-                mime_type=image_mime_type,
-            )
+            genai.types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type)
         )
 
     return batch_request
 
 
-def parse_batch_response(
-    response: Any, expected_entry_ids: set[str]
-) -> dict[str, dict]:
+def parse_batch_response(response: Any, expected_entry_ids: set[str]) -> dict[str, dict]:
     payload = getattr(response, "parsed", None)
     if payload is None:
         response_text = normalize_response_json_text(getattr(response, "text", ""))
-        TEMP_BATCH_RESPONSE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        TEMP_BATCH_RESPONSE_PATH.write_text(response_text, encoding="utf-8")
         try:
             payload = json.loads(response_text)
         except json.JSONDecodeError:
@@ -338,16 +187,42 @@ def describe_prepared_batch(
             "A Gemini client is required when dummy descriptions are disabled."
         )
 
-    prompt_sections = batch_request["prompt_sections"]
     response = client.models.generate_content(
         model=valid_entries[0]["metadata"].get("model_name"),
         contents=batch_request["contents"],
         config=genai.types.GenerateContentConfig(
-            system_instruction=prompt_sections["admin"],
+            system_instruction=batch_request["prompt_sections"]["admin"],
             response_mime_type="application/json",
+            response_json_schema=batch_request["response_schema"],
         ),
     )
-    return parse_batch_response(
-        response,
-        batch_request["expected_entry_ids"],
+    return parse_batch_response(response, batch_request["expected_entry_ids"])
+
+
+def describe_image_batch(
+    client: genai.Client | None,
+    batch_entries: list[dict],
+    use_dummy_descriptions: bool = False,
+    analysis_image_max_width: int | None = None,
+    analysis_image_max_height: int | None = None,
+) -> dict[str, dict]:
+    prepared_entries = []
+    for entry in batch_entries or []:
+        prepared_entry = prepare_batch_entry(
+            entry.get("entry_id"),
+            entry.get("metadata") or {},
+            use_dummy_descriptions=use_dummy_descriptions,
+            analysis_image_max_width=analysis_image_max_width,
+            analysis_image_max_height=analysis_image_max_height,
+        )
+        if prepared_entry is not None:
+            prepared_entries.append(prepared_entry)
+
+    return describe_prepared_batch(
+        client,
+        build_batch_request(
+            prepared_entries,
+            use_dummy_descriptions=use_dummy_descriptions,
+        ),
+        use_dummy_descriptions=use_dummy_descriptions,
     )

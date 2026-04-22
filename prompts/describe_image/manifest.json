@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "kind": "single_media_prompt",
+  "media_type": "image",
+  "admin": {
+    "identity": [
+      "You are an image analyzer and descriptor."
+    ],
+    "instructions": [
+      "media_instructions.md"
+    ],
+    "schema": [
+      "description_schema.md"
+    ],
+    "output": [
+      "## DATA FORMAT\n\nReturn exactly one object matching the single image description schema shown above."
+    ]
+  },
+  "prompt": [
+    "prompt.md"
+  ],
+  "response_schema": "image_response_schema.json",
+  "dummy_response": "image_dummy_description.json"
+}

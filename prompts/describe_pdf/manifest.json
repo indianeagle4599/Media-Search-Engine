@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "kind": "single_media_prompt",
+  "media_type": "pdf",
+  "admin": {
+    "identity": [
+      "You are a PDF analyzer and descriptor."
+    ],
+    "instructions": [
+      "media_instructions.md"
+    ],
+    "schema": [
+      "description_schema.md"
+    ],
+    "output": [
+      "## DATA FORMAT\n\nReturn exactly one object matching the single PDF description schema shown above."
+    ]
+  },
+  "prompt": [
+    "prompt.md"
+  ],
+  "response_schema": "pdf_response_schema.json",
+  "dummy_response": "pdf_dummy_description.json"
+}

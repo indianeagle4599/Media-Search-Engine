@@ -1,8 +1,10 @@
 Next Up
 
-[X] Create a random data downloader
-[X] Add filter options in gallery
-[X] Add compact list and details list view in search and gallery
+[ ] Finish refactoring prompt assembly to return isolated multimodal inputs instead of one flat concatenated string.
+[ ] Add provider-specific payload routing for Gemini, Claude, and OpenAI.
+[ ] Keep Gemini synchronous, but design async batch execution for Claude and OpenAI.
+[ ] Add PDF processing as another stream in the application.
+[ ] Explore local, smaller, and more specialised models for image and PDF information extraction.
 
 [ ] Create a simple ranking evaluator to test retrieval effectiveness and quality.
 [ ] Design test cases for various functions using PyTest.
@@ -20,14 +22,39 @@ Tasks
 [ ] Media indexer improvements
     [ ] VLM
         [ ] Explore lighter models
+        [ ] Explore smaller and more specialised models for extraction tasks
+        [ ] Evaluate local models that can extract the same information from images
+        [ ] Evaluate local models that can extract the same information from PDFs
+        [ ] Compare local vs hosted models for accuracy, speed, cost, and batch reliability
+    [ ] Prompt assembly and provider execution
+        [ ] Stop flattening multimodal requests into one text block
+        [X] Add manifest-driven prompt assembly for shared prompt assets
+        [ ] Return isolated prompt inputs from prompt assembly
+            [ ] System/Admin prompt string
+            [ ] User prompt plus metadata string
+            [ ] Image data as raw bytes or base64
+            [ ] MIME type string
+        [ ] Add provider-specific payload formatting
+            [ ] Gemini: mixed text plus SDK Part list, with system prompt passed separately
+            [ ] Claude: structured content array with base64 image source, with system prompt top-level
+            [ ] OpenAI: message array with system role first and image data URIs
+        [ ] Redesign batch execution by provider
+            [ ] Gemini: keep synchronous batch path
+            [ ] Claude: build async JSONL single-image batch flow
+            [ ] OpenAI: build async JSONL single-image batch flow
+        [ ] Keep extraction and templating unified until provider routing
+    [ ] PDF processing stream
+        [ ] Add PDF processing as another first-class application stream
+        [X] Add PDF prompt assets, schema, and dummy response templates
+        [ ] Extend prompt assembly to support PDF-specific inputs in the real execution path
+        [ ] Add PDF ingesting, preparation, and provider support in application code
+        [ ] Add provider-specific payload routing and execution for PDF processing
     [ ] Use pydantic for maintaining standard schema
     [ ] ChromaDB
         [ ] Create retrieval evaluation setup
     [ ] Add RAG-based search features.
     [ ] Add Agentic search utils for specialised searching.
 [ ] UI
-    [X] Add filter options in gallery
-    [X] Add compact list and details list view in search and gallery
     [ ] Add a Chat option as relevant.
 [ ] Good SDE practices
     [ ] Setup Pytest and design test cases for various functions.
