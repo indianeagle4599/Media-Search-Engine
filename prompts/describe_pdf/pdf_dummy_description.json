@@ -1,0 +1,19 @@
+{
+  "content": {
+    "summary": "Dummy PDF description for __filename__",
+    "key_points": [],
+    "sections": [],
+    "entities": [],
+    "visual_elements": [],
+    "miscellaneous": ""
+  },
+  "context": {
+    "document_category": "",
+    "intent": "",
+    "estimated_date": "",
+    "event": "Dummy validation run",
+    "analysis": "No model call was made.",
+    "metadata_relevance": "",
+    "other_details": ""
+  }
+}

@@ -12,6 +12,7 @@ import streamlit as st
 
 from ui.config import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from ui.data import (
+    clear_chroma_client_cache,
     clear_uploaded_entries_cache,
     delete_uploaded_entry,
     get_chroma_client,

@@ -1,0 +1,21 @@
+{
+  "content": {
+    "summary": "Dummy description for __filename__",
+    "objects": [],
+    "text": "",
+    "vibe": [],
+    "background": "",
+    "detailed_description": "Generated locally to inspect prompt assembly only.",
+    "miscellaneous": ""
+  },
+  "context": {
+    "primary_category": "",
+    "intent": "",
+    "composition": "",
+    "estimated_date": "",
+    "event": "Dummy validation run",
+    "analysis": "No model call was made.",
+    "metadata_relevance": "",
+    "other_details": ""
+  }
+}

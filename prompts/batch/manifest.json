@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "kind": "common_batch_prompt",
+  "admin": {
+    "identity": [
+      "common_identity.md"
+    ],
+    "output": [
+      "common_output.md"
+    ]
+  },
+  "prompt": [
+    "prompt.md"
+  ],
+  "item": [
+    "item.md"
+  ]
+}

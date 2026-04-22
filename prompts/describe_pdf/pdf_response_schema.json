@@ -1,0 +1,84 @@
+{
+  "type": "object",
+  "required": ["content", "context"],
+  "properties": {
+    "content": {
+      "type": "object",
+      "required": [
+        "summary",
+        "key_points",
+        "sections",
+        "entities",
+        "visual_elements",
+        "miscellaneous"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "key_points": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "visual_elements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "miscellaneous": {
+          "type": "string"
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "required": [
+        "document_category",
+        "intent",
+        "estimated_date",
+        "event",
+        "analysis",
+        "metadata_relevance",
+        "other_details"
+      ],
+      "properties": {
+        "document_category": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "estimated_date": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string"
+        },
+        "analysis": {
+          "type": "string"
+        },
+        "metadata_relevance": {
+          "type": "string"
+        },
+        "other_details": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

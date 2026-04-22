@@ -17,7 +17,7 @@ By splitting narrative, lexical, OCR, and absolute fields into their own indexes
 
 ## File System
 - **Indexer (`utils/io.py`)** — Walk `images_root/`, hash each asset, normalize paths, extract whitelisted EXIF/HEIF tags, and emit a `dates` block with reliability flags.
-- **Captioner (`utils/prompt.py`)** — Assemble the batch prompt under `/prompts/describe_image_batch`, send Gemini requests for supported images, and enforce the `content/context` schema.
+- **Captioner (`utils/prompt.py`)** — Assemble the batch prompt from the manifest-driven `/prompts/common`, `/prompts/batch`, and `/prompts/describe_image` prompt assets, send Gemini requests for supported images, and enforce the `content/context` schema.
 - **Persistence (`utils/mongo.py`)** — Store each `<file_hash>_<model_hash>` entry with metadata + description, dedupe by probing Mongo first, and upsert only what’s missing.
 - **Vector Store (`utils/chroma.py`)** — Split descriptions into narrative, lexical, OCR, and absolute fields; feed each into its own Chroma collection with field-appropriate embeddings (MiniLM vs. Ollama `mxbai-embed-large`), keeping prior vectors unless `overwrite=True`.
 - **Retrieval (`query_all_collections`)** — Clean queries, reuse cached embeddings, query every populated collection, and fuse results with Reciprocal Rank Fusion (weighted toward narrative fields).
